@@ -1,0 +1,28 @@
+# Binaries
+gussync
+gussync.exe
+*.exe
+
+# Build artifacts
+*.log
+log.txt
+
+# State files (user-specific)
+gus_state.md
+gus_errors.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test directories
+test_backup/
+tmp/
+

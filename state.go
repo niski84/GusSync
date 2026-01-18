@@ -1,0 +1,228 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"sync"
+)
+
+// StateManager manages the markdown state file with thread-safe operations
+type StateManager struct {
+	mu                 sync.Mutex
+	stateFile          string
+	stateMap           map[string]string // path -> hash (for completed files)
+	failureMap         map[string]int    // path -> failure count
+	hasSuccess         bool              // track if we've had any success in this run
+	lastCompletedPath  string            // last file path that was completed (for resume)
+	resumePointReached bool              // flag to track if we've passed the resume point
+	fileHandle         *os.File
+	writer             *bufio.Writer
+}
+
+// NewStateManager creates a new StateManager and loads existing state
+func NewStateManager(stateFile string) (*StateManager, error) {
+	sm := &StateManager{
+		stateFile:  stateFile,
+		stateMap:   make(map[string]string),
+		failureMap: make(map[string]int),
+		hasSuccess: false,
+	}
+
+	// Load existing state if file exists
+	if err := sm.loadState(); err != nil {
+		return nil, fmt.Errorf("failed to load state: %w", err)
+	}
+
+	// Find last completed file path from state map (lexicographically last)
+	if len(sm.stateMap) > 0 {
+		var lastPath string
+		for path := range sm.stateMap {
+			if path > lastPath {
+				lastPath = path
+			}
+		}
+		sm.lastCompletedPath = lastPath
+	}
+
+	// Open file for appending (create if doesn't exist)
+	var err error
+	sm.fileHandle, err = os.OpenFile(stateFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open state file: %w", err)
+	}
+
+	sm.writer = bufio.NewWriter(sm.fileHandle)
+
+	return sm, nil
+}
+
+// loadState parses the markdown file and populates the state map
+func (sm *StateManager) loadState() error {
+	file, err := os.Open(sm.stateFile)
+	if os.IsNotExist(err) {
+		return nil // File doesn't exist yet, that's okay
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Pattern for completed: - [x] /path/to/file | Hash: <hash>
+	// Pattern for failed: - [ ] /path/to/file | Failures: <count>
+	completedPattern := regexp.MustCompile(`^\s*-\s+\[x\]\s+(.+?)(?:\s*\|\s*Hash:\s*(\S+))?\s*$`)
+	failedPattern := regexp.MustCompile(`^\s*-\s+\[\s\]\s+(.+?)(?:\s*\|\s*Failures:\s*(\d+))?\s*$`)
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Check for completed files
+		if matches := completedPattern.FindStringSubmatch(line); matches != nil {
+			path := matches[1]
+			hash := matches[2]
+			sm.stateMap[path] = hash
+			continue
+		}
+
+		// Check for failed files
+		if matches := failedPattern.FindStringSubmatch(line); matches != nil {
+			path := matches[1]
+			var count int
+			if len(matches) > 2 && matches[2] != "" {
+				fmt.Sscanf(matches[2], "%d", &count)
+			} else {
+				count = 1 // Default to 1 if not specified
+			}
+			sm.failureMap[path] = count
+		}
+	}
+
+	return scanner.Err()
+}
+
+// IsDone checks if a file path is already marked as done
+func (sm *StateManager) IsDone(path string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	_, exists := sm.stateMap[path]
+	return exists
+}
+
+// ShouldSkipForResume - REMOVED: This was using lexicographic comparison which is incorrect
+// Files are discovered in directory traversal order, not alphabetical order
+// The IsDone check already efficiently skips completed files
+// We should NOT skip files based on lexicographic path comparison
+func (sm *StateManager) ShouldSkipForResume(path string) bool {
+	// Always return false - let IsDone handle skipping completed files
+	return false
+}
+
+// ShouldRetry checks if a file should be retried (hasn't failed 10 times yet)
+func (sm *StateManager) ShouldRetry(path string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// If already done, don't retry
+	if _, done := sm.stateMap[path]; done {
+		return false
+	}
+
+	// If failed 10+ times, don't retry
+	failures := sm.failureMap[path]
+	return failures < 10
+}
+
+// RecordFailure records a failure for a file (only if we've had a success)
+func (sm *StateManager) RecordFailure(path string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Only increment failure count if we've had at least one success
+	if !sm.hasSuccess {
+		// Don't record failure yet - just skip for now
+		return nil
+	}
+
+	// Increment failure count (max one per run)
+	sm.failureMap[path]++
+	failures := sm.failureMap[path]
+
+	// Update state file with failure count
+	line := fmt.Sprintf("- [ ] %s | Failures: %d\n", path, failures)
+	if _, err := sm.writer.WriteString(line); err != nil {
+		return fmt.Errorf("failed to write failure to state file: %w", err)
+	}
+
+	return nil
+}
+
+// MarkSuccess records that we've had at least one successful copy
+func (sm *StateManager) MarkSuccess() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.hasSuccess = true
+}
+
+// MarkDone marks a file as done and appends to the state file
+func (sm *StateManager) MarkDone(sourcePath, hash string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Update in-memory map
+	sm.stateMap[sourcePath] = hash
+
+	// Update last completed path if this file comes after it lexicographically
+	if sourcePath > sm.lastCompletedPath {
+		sm.lastCompletedPath = sourcePath
+	}
+
+	// Append to file
+	line := fmt.Sprintf("- [x] %s | Hash: %s\n", sourcePath, hash)
+	if _, err := sm.writer.WriteString(line); err != nil {
+		return fmt.Errorf("failed to write to state file: %w", err)
+	}
+
+	// Flush periodically (but don't sync every time for performance)
+	// We'll rely on the deferred flush in Close()
+	return nil
+}
+
+// Flush forces a flush of the buffered writer
+func (sm *StateManager) Flush() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.writer.Flush()
+}
+
+// Close closes the state file
+func (sm *StateManager) Close() error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if err := sm.writer.Flush(); err != nil {
+		return err
+	}
+	return sm.fileHandle.Close()
+}
+
+// GetStats returns the number of completed files
+func (sm *StateManager) GetStats() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return len(sm.stateMap)
+}
+
+// GetAllCompletedFiles returns a copy of all completed file paths and their hashes
+func (sm *StateManager) GetAllCompletedFiles() map[string]string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	result := make(map[string]string, len(sm.stateMap))
+	for path, hash := range sm.stateMap {
+		result[path] = hash
+	}
+	return result
+}
