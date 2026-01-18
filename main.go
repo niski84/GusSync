@@ -43,6 +43,114 @@ var PriorityPaths = []string{
 	"Android/data",            // App data
 }
 
+// shouldExcludeFile determines if a file should be excluded from backup
+// Returns true if the file should be skipped
+func shouldExcludeFile(normalizedPath string) bool {
+	// Extract file extension
+	ext := strings.ToLower(filepath.Ext(normalizedPath))
+	// Remove leading dot
+	if len(ext) > 0 && ext[0] == '.' {
+		ext = ext[1:]
+	}
+	
+	// Extract base filename for pattern matching
+	baseName := strings.ToLower(filepath.Base(normalizedPath))
+	dirPath := strings.ToLower(filepath.Dir(normalizedPath))
+	fullPathLower := strings.ToLower(normalizedPath)
+	
+	// 1. Hidden metadata files (exact matches)
+	if baseName == ".nomedia" || baseName == ".ds_store" || baseName == "thumbs.db" {
+		return true
+	}
+	
+	// 2. File extensions to exclude
+	excludedExts := map[string]bool{
+		"exo": true, "cache": true, "tmp": true, "partial": true,
+		"download": true, "crdownload": true, "dash": true, "m4s": true,
+		"fmp4": true, "db": true, "db-wal": true, "db-shm": true,
+		"journal": true, "log": true, "temp.mp4": true,
+		"transcoded": true, "encoded": true, "working": true,
+		"part": true, "aria2": true, "torrent": true, "resume": true,
+		"stacktrace": true, "crash": true, "anr": true, "tombstone": true,
+	}
+	
+	// Check extension
+	if excludedExts[ext] {
+		return true
+	}
+	
+	// Special case: .temp.mp4 (check if filename ends with this)
+	if strings.HasSuffix(baseName, ".temp.mp4") {
+		return true
+	}
+	
+	// 3. File patterns (thumbnails, cache images)
+	if strings.HasPrefix(baseName, "thumb_") && ext == "jpg" {
+		return true
+	}
+	if strings.HasSuffix(baseName, ".cache.jpg") {
+		return true
+	}
+	
+	// 4. Directory exclusions (check path patterns)
+	// Android/data/** (entire directory - skip all)
+	if strings.HasPrefix(dirPath, "android/data") {
+		// EXCEPTION: Android/media/** should be included (still filtered by extension)
+		if strings.HasPrefix(fullPathLower, "android/media/") {
+			// Allow Android/media, but still apply extension filter
+			// Will be filtered by allowlist below
+		} else {
+			// Skip all Android/data except Android/media
+			return true
+		}
+	}
+	
+	// Android/obb/** (skip all)
+	if strings.HasPrefix(dirPath, "android/obb") {
+		return true
+	}
+	
+	// Cache directories
+	if strings.Contains(fullPathLower, "/cache/") ||
+		strings.Contains(fullPathLower, "/code_cache/") ||
+		strings.Contains(fullPathLower, "/files/cache/") ||
+		strings.Contains(fullPathLower, "/thumbnails/") ||
+		strings.Contains(fullPathLower, "/files/crash/") ||
+		strings.Contains(fullPathLower, "/download/.cache/") {
+		return true
+	}
+	
+	// Specific Google Play Services paths
+	if strings.HasPrefix(fullPathLower, "android/data/com.google.android.gms/") ||
+		strings.HasPrefix(fullPathLower, "android/data/com.android.vending/") ||
+		strings.HasPrefix(fullPathLower, "android/data/com.google.android.gms.policy_sidecar_aps/") {
+		return true
+	}
+	
+	// 5. Extension allowlist for Android/media (if we got here and path is Android/media)
+	// Only allow specific media/document extensions
+	if strings.HasPrefix(fullPathLower, "android/media/") {
+		allowedExts := map[string]bool{
+			// Images
+			"jpg": true, "jpeg": true, "png": true, "heic": true, "webp": true,
+			// Video
+			"mp4": true, "mov": true, "mkv": true, "avi": true, "webm": true,
+			// Audio
+			"mp3": true, "flac": true, "wav": true, "m4a": true, "aac": true,
+			// Documents
+			"pdf": true, "doc": true, "docx": true, "xls": true, "xlsx": true,
+			"txt": true, "md": true,
+		}
+		
+		// If extension not in allowlist, exclude it
+		if ext == "" || !allowedExts[ext] {
+			return true
+		}
+	}
+	
+	return false
+}
+
 var (
 	sourcePath string
 	destPath   string
@@ -341,24 +449,38 @@ func main() {
 
 	// Wait for all workers with timeout if shutdown was requested
 	if shutdownRequested {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Shutdown requested, setting up worker wait with timeout...\n")
 		// Use a channel to wait for workers with timeout
 		workersDone := make(chan bool, 1)
 		go func() {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Worker wait goroutine started, waiting for wg.Wait()...\n")
 			wg.Wait()
+			fmt.Fprintf(os.Stderr, "[DEBUG] wg.Wait() completed, sending workersDone signal...\n")
 			workersDone <- true
+			fmt.Fprintf(os.Stderr, "[DEBUG] workersDone signal sent.\n")
 		}()
 
 		// Wait up to 10 seconds for workers to finish
 		timeout := 10 * time.Second
+		fmt.Fprintf(os.Stderr, "[DEBUG] Starting worker wait with %v timeout...\n", timeout)
 		select {
 		case <-workersDone:
 			// Workers finished gracefully
+			fmt.Fprintf(os.Stderr, "[DEBUG] Workers finished gracefully, waiting for error handler...\n")
 			errorWg.Wait()
+			fmt.Fprintf(os.Stderr, "[DEBUG] Error handler finished.\n")
 		case <-time.After(timeout):
 			fmt.Fprintf(os.Stderr, "\n⚠️  Workers did not finish within %v, forcing exit...\n", timeout)
-			stateManager.Flush()
+			fmt.Fprintf(os.Stderr, "[DEBUG] Timeout reached. Flushing state manager...\n")
+			if err := stateManager.Flush(); err != nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG] ERROR flushing state: %v\n", err)
+			} else {
+				fmt.Fprintf(os.Stderr, "[DEBUG] State flushed successfully.\n")
+			}
 			// Force exit immediately - don't wait for anything else
+			fmt.Fprintf(os.Stderr, "[DEBUG] About to call os.Exit(130)...\n")
 			fmt.Fprintf(os.Stderr, "Force exiting now...\n")
+			os.Stderr.Sync() // Force flush stderr before exit
 			os.Exit(130) // Exit code 130 typically means killed by SIGINT
 		}
 		
@@ -390,18 +512,19 @@ func main() {
 	
 	fmt.Printf("\nFiles discovered: %d\n", discoveredCount)
 	
-	// For mount mode, do a quick actual file count to verify discovery completeness
+	// For mount mode, ALWAYS do a complete rescan at the end to catch any missed files
+	// (countFilesInSource may also be limited by gphoto2, so we can't rely on it)
 	if mode == "mount" {
-		actualCount := countFilesInSource(sourcePath)
-		if actualCount > 0 && discoveredCount < int64(actualCount) {
-			missingPct := float64(actualCount-int(discoveredCount)) / float64(actualCount) * 100
-			fmt.Fprintf(os.Stderr, "\n⚠️  WARNING: Only discovered %d of %d files (%.1f%% missing)!\n", 
-				discoveredCount, actualCount, missingPct)
-			fmt.Fprintf(os.Stderr, "   Some directories may have timed out or failed during scanning.\n")
-			fmt.Fprintf(os.Stderr, "   Check the error log for directory read timeouts.\n")
-			fmt.Fprintf(os.Stderr, "   You may need to run again or increase directory timeout.\n\n")
-		} else if actualCount > 0 {
-			fmt.Printf("File count verified: %d files found in source (matches discovered count)\n", actualCount)
+		fmt.Printf("\n[DEBUG] Performing complete rescan to ensure all files are discovered...\n")
+		fmt.Printf("[DEBUG] discoveredCount from scanner: %d files\n", discoveredCount)
+		
+		// Always run complete rescan - it will skip files that are already done
+		missingFiles := performCompleteRescan(ctx, sourcePath, sourcePath, destPath, stateManager, mode, copier, errorChan, statsChan, workerStatus, numWorkers)
+		
+		if missingFiles > 0 {
+			fmt.Printf("\n✓ Complete rescan found and processed %d additional files\n", missingFiles)
+		} else {
+			fmt.Printf("\n✓ Complete rescan completed - no additional files found\n")
 		}
 	}
 
@@ -425,10 +548,14 @@ func countFilesInSource(root string) int {
 	go func() {
 		filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "[DEBUG countFilesInSource] Error walking %s: %v\n", path, err)
 				return nil // Skip errors, just count what we can
 			}
 			if !d.IsDir() {
 				count++
+				if count <= 20 {
+					fmt.Fprintf(os.Stderr, "[DEBUG countFilesInSource] Found file #%d: %s\n", count, path)
+				}
 			}
 			select {
 			case <-ctx.Done():
@@ -442,11 +569,130 @@ func countFilesInSource(root string) int {
 	
 	select {
 	case <-done:
+		fmt.Fprintf(os.Stderr, "[DEBUG countFilesInSource] Walk completed. Total: %d files\n", count)
 		return count
 	case <-ctx.Done():
 		// Timeout - return what we counted so far
+		fmt.Fprintf(os.Stderr, "[DEBUG countFilesInSource] Walk timed out. Counted so far: %d files\n", count)
 		return count
 	}
+}
+
+// performCompleteRescan does a full directory walk ignoring all state, discovering any missing files
+func performCompleteRescan(ctx context.Context, sourcePath, sourceRoot, destRoot string, stateManager *StateManager, mode string, copier Copier, errorChan chan<- error, statsChan chan<- CopyStats, workerStatus *struct {
+	sync.Mutex
+	status map[int]string
+}, numWorkers int) int {
+	fmt.Printf("Performing complete rescan (ignoring directory state)...\n")
+	
+	// Create new channels for rescan (old ones may be closed)
+	rescanJobChan := make(chan FileJob, jobBufferSize)
+	rescanErrorChan := make(chan error, 100)
+	rescanStatsChan := make(chan CopyStats, 100)
+	var rescanWg sync.WaitGroup
+	
+	// Error handler for rescan (just log errors, don't fail)
+	go func() {
+		for err := range rescanErrorChan {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[RESCAN ERROR] %v\n", err)
+			}
+		}
+	}()
+	
+	// Stats handler for rescan (discard stats, we already have final stats)
+	go func() {
+		for range rescanStatsChan {
+			// Discard stats - we're just counting files processed
+		}
+	}()
+	
+	// Start workers for rescan
+	for i := 0; i < numWorkers; i++ {
+		rescanWg.Add(1)
+		go worker(ctx, i, rescanJobChan, rescanErrorChan, rescanStatsChan, stateManager, sourceRoot, destRoot, mode, copier, workerStatus, &rescanWg)
+	}
+	
+	// Count files discovered in rescan
+	var rescanCount int64
+	var rescanCountMu sync.Mutex
+	
+	// Do a complete walk ignoring directory state
+	filepath.WalkDir(sourcePath, func(path string, d fs.DirEntry, err error) error {
+		select {
+		case <-ctx.Done():
+			return context.Canceled
+		default:
+		}
+		
+		if err != nil {
+			return nil // Skip errors, continue walking
+		}
+		
+		if d.IsDir() {
+			return nil // Continue into directories
+		}
+		
+		// Calculate relative path
+		relPath, err := filepath.Rel(sourceRoot, path)
+		if err != nil {
+			return nil // Skip if can't calculate relative path
+		}
+		
+		// Normalize path to check exclusion (protocol-agnostic)
+		normalizedPath, err := normalizePhonePath(path, sourceRoot)
+		if err != nil {
+			normalizedPath = relPath // Fallback
+		}
+		
+		// Check if file should be excluded (cache, temp, system files)
+		if shouldExcludeFile(normalizedPath) {
+			return nil // Skip excluded files
+		}
+		
+		// Check if this file is already done (with source filtering)
+		if stateManager.IsDoneForSource(path, sourceRoot) {
+			// Check if destination exists
+			destPathFull := filepath.Join(destRoot, relPath)
+			if _, err := os.Stat(destPathFull); err == nil {
+				// Already copied - skip
+				return nil
+			}
+		}
+		
+		// File not done or destination missing - send to workers
+		rescanCountMu.Lock()
+		rescanCount++
+		rescanCountMu.Unlock()
+		
+		select {
+		case rescanJobChan <- FileJob{SourcePath: path, RelPath: relPath}:
+		case <-ctx.Done():
+			return context.Canceled
+		}
+		
+		return nil
+	})
+	
+	// Close job channel and wait for workers
+	close(rescanJobChan)
+	rescanWg.Wait()
+	
+	// Give handlers time to process any remaining messages
+	time.Sleep(100 * time.Millisecond)
+	
+	// Close rescan channels (handlers will exit when channels are closed)
+	close(rescanErrorChan)
+	close(rescanStatsChan)
+	
+	// Give handlers time to exit
+	time.Sleep(50 * time.Millisecond)
+	
+	rescanCountMu.Lock()
+	count := int(rescanCount)
+	rescanCountMu.Unlock()
+	
+	return count
 }
 
 // CopyStats represents statistics for a copy operation
@@ -467,7 +713,13 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 
 	defer func() {
 		if r := recover(); r != nil {
-			errorChan <- fmt.Errorf("worker %d panic: %v", id, r)
+			// Try to send error, but don't panic if channel is closed
+			select {
+			case errorChan <- fmt.Errorf("worker %d panic: %v", id, r):
+			default:
+				// Channel closed or full - just log to stderr
+				fmt.Fprintf(os.Stderr, "[WORKER PANIC] Worker %d panic: %v\n", id, r)
+			}
 		}
 	}()
 
@@ -488,12 +740,42 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 				sourcePath := job.SourcePath
 				relPath := job.RelPath
 				
-				// Check if already done FIRST (before any other operations)
-				// This makes resuming much faster - skip immediately without any work
-				// BUT: Also verify destination file exists - if marked done but destination missing, recopy it
-				if stateManager.IsDone(sourcePath) {
-					// Verify destination file actually exists before skipping
-					destPathFull := filepath.Join(destRoot, relPath)
+				// Normalize phone path (protocol-agnostic)
+				normalizedPath, err := normalizePhonePath(sourcePath, sourceRoot)
+				if err != nil {
+					errorChan <- fmt.Errorf("failed to normalize path for %s: %w", sourcePath, err)
+					statsChan <- CopyStats{Success: false}
+					continue
+				}
+				
+				// Check if already done by hash FIRST (protocol-agnostic check)
+				// This allows switching between protocols without duplicating files
+				// For small files (<100MB), we can hash-check early
+				var shouldSkipByHash bool
+				var existingHash string
+				
+				if mode == "mount" {
+					if fileInfo, err := os.Stat(sourcePath); err == nil {
+						// Only hash-check files under 100MB to avoid slow startup
+						if fileInfo.Size() < 100*1024*1024 {
+							hash, err := calculateFileHash(sourcePath)
+							if err == nil {
+								if stateManager.IsDoneByHash(hash) {
+									shouldSkipByHash = true
+									existingHash = hash
+								}
+							}
+						}
+					}
+				}
+				
+				// Also check by path (backward compatibility)
+				shouldSkipByPath := stateManager.IsDoneForSource(sourcePath, sourceRoot)
+				
+				// If either check says done, verify destination exists
+				if shouldSkipByHash || shouldSkipByPath {
+					// Use normalized path for destination check
+					destPathFull := filepath.Join(destRoot, normalizedPath)
 					if _, err := os.Stat(destPathFull); err == nil {
 						// Destination exists - safe to skip
 						statsChan <- CopyStats{Skipped: true}
@@ -501,7 +783,11 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 					}
 					// Destination missing - even though marked done, we need to recopy
 					// Log this anomaly and continue with copy
-					errorChan <- fmt.Errorf("file marked as done but destination missing: %s -> %s (will recopy)", sourcePath, destPathFull)
+					if shouldSkipByHash {
+						errorChan <- fmt.Errorf("file hash marked as done but destination missing: %s (hash: %s) -> %s (will recopy)", sourcePath, existingHash, destPathFull)
+					} else {
+						errorChan <- fmt.Errorf("file marked as done but destination missing: %s -> %s (will recopy)", sourcePath, destPathFull)
+					}
 				}
 
 				// Check if we should retry (hasn't failed 10 times yet)
@@ -600,7 +886,7 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 				workerStatus.Unlock()
 
 				// Copy the file using the copier interface
-				bytesCopied, err := copier.Copy(ctx, sourcePath, sourceRoot, destRoot, progressChan)
+				bytesCopied, err = copier.Copy(ctx, sourcePath, sourceRoot, destRoot, progressChan)
 				close(progressChan)
 				<-progressDone // Wait for progress monitor to finish
 
@@ -662,7 +948,12 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 					if mode == "mount" {
 						hashToStore = sourceHash
 					}
-					if err := stateManager.MarkDone(sourcePath, hashToStore); err != nil {
+					
+					// normalizedPath already computed above in the worker function
+					// Just use it here (it's already in scope from line 611)
+					
+					// Mark as done with hash and normalized path
+					if err := stateManager.MarkDone(sourcePath, hashToStore, normalizedPath); err != nil {
 						errorChan <- fmt.Errorf("failed to mark done: %w", err)
 					}
 
@@ -738,17 +1029,27 @@ func printStats(stats *struct {
 	status map[int]string
 }, numWorkers int) {
 	stats.Lock()
-	elapsed := time.Since(stats.startTime)
 	deltaTime := time.Since(stats.lastStatsTime)
 	
 	var rate float64
 	var deltaMB float64
-	if elapsed.Seconds() > 0 {
-		rate = float64(stats.totalBytes) / elapsed.Seconds()
-	}
+	
+	// Calculate rate based on recent activity (last 2 seconds), not overall average
+	// This ensures speed drops to 0 when idle instead of slowly decreasing
 	if deltaTime.Seconds() > 0 {
 		deltaBytes := stats.totalBytes - stats.lastTotalBytes
 		deltaMB = float64(deltaBytes) / (1024 * 1024)
+		
+		// Recent transfer rate: bytes transferred in the last interval
+		rate = float64(deltaBytes) / deltaTime.Seconds()
+	} else {
+		// No time elapsed (shouldn't happen, but handle it)
+		rate = 0
+	}
+	
+	// If deltaBytes is 0 (no recent activity), rate should be 0
+	if stats.totalBytes == stats.lastTotalBytes {
+		rate = 0
 	}
 	
 	stats.lastTotalBytes = stats.totalBytes

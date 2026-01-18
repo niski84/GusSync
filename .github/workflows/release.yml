@@ -1,0 +1,100 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Trigger on version tags like v1.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    
+    - name: Get version from tag
+      id: get_version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version: $VERSION"
+    
+    - name: Make build script executable
+      run: chmod +x scripts/build.sh
+    
+    - name: Build binaries
+      run: ./scripts/build.sh ${{ steps.get_version.outputs.version }}
+    
+    - name: Upload Linux amd64 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: gussync-linux-amd64
+        path: dist/gussync-linux-amd64
+        retention-days: 90
+    
+    - name: Upload Linux arm64 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: gussync-linux-arm64
+        path: dist/gussync-linux-arm64
+        retention-days: 90
+    
+    - name: Upload Windows amd64 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: gussync-windows-amd64.exe
+        path: dist/gussync-windows-amd64.exe
+        retention-days: 90
+    
+    - name: Upload Windows 386 binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: gussync-windows-386.exe
+        path: dist/gussync-windows-386.exe
+        retention-days: 90
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+    
+    - name: Get version from tag
+      id: get_version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "version_clean=${VERSION#v}" >> $GITHUB_OUTPUT
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.version }}
+        name: GusSync ${{ steps.get_version.outputs.version_clean }}
+        body: |
+          GusSync ${{ steps.get_version.outputs.version_clean }} Release
+          
+          Binaries for Linux (amd64, arm64) and Windows (amd64, 386).
+        files: |
+          dist/gussync-linux-amd64
+          dist/gussync-linux-arm64
+          dist/gussync-windows-amd64.exe
+          dist/gussync-windows-386.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

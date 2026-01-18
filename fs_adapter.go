@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+// normalizePhonePath is defined in copy.go - we import it here for use
+
 const (
 	// DirReadTimeout is the timeout for reading a single directory (important for MTP)
 	DirReadTimeout = 60 * time.Second
@@ -109,9 +111,11 @@ func (fs *FSScanner) Scan(ctx context.Context, root string, jobs chan<- FileJob,
 	}()
 
 	var wg sync.WaitGroup
+	fmt.Fprintf(os.Stderr, "[DEBUG FSScanner] Starting scan from root: %s\n", root)
 	wg.Add(1)
 	fs.scanDir(ctx, root, root, jobs, errors, &wg)
 	wg.Wait() // Wait for all subdirectories to finish
+	fmt.Fprintf(os.Stderr, "[DEBUG FSScanner] Scan complete\n")
 	
 	// Stop health checker when scan completes
 	close(healthDone)
@@ -155,7 +159,10 @@ func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs cha
 	if fs.stateManager != nil {
 		if fs.stateManager.IsDirScanned(current) {
 			// Directory already fully scanned, skip it
+			fmt.Fprintf(os.Stderr, "[DEBUG] Skipping directory (marked as scanned): %s\n", current)
 			return
+		} else {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Scanning directory: %s\n", current)
 		}
 	}
 
@@ -169,11 +176,25 @@ func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs cha
 	// Read directory in a goroutine with timeout
 	go func() {
 		defer close(entriesChan)
+		fmt.Fprintf(os.Stderr, "[DEBUG scanDir] Reading directory: %s\n", current)
 		entries, err := os.ReadDir(current)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[DEBUG scanDir] ReadDir ERROR for %s: %v\n", current, err)
 			entriesChan <- dirEntryResult{err: err}
 			return
 		}
+		fmt.Fprintf(os.Stderr, "[DEBUG scanDir] ReadDir returned %d entries for %s\n", len(entries), current)
+		
+		fileCount := 0
+		dirCount := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				dirCount++
+			} else {
+				fileCount++
+			}
+		}
+		fmt.Fprintf(os.Stderr, "[DEBUG scanDir] Directory %s: %d files, %d subdirectories\n", current, fileCount, dirCount)
 
 		// Sort entries: directories first, then by priority
 		// Always prioritize common paths (DCIM, Camera, etc.)
@@ -251,12 +272,27 @@ func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs cha
 					errors <- fmt.Errorf("failed to calculate relative path for %s: %w", path, err)
 					continue
 				}
+				
+				// Normalize path to check exclusion (protocol-agnostic)
+				normalizedPath, err := normalizePhonePath(path, root)
+				if err != nil {
+					// If normalization fails, use relPath as fallback
+					normalizedPath = relPath
+				}
+				
+				// Check if file should be excluded
+				if shouldExcludeFile(normalizedPath) {
+					// Skip excluded files (cache, temp, system files)
+					continue
+				}
+				
 				// Track discovered file in this directory
 				if fs.stateManager != nil {
 					fs.stateManager.AddDiscoveredFileToDir(current, path)
 				}
 				// Collect files to process
 				filesToProcess = append(filesToProcess, FileJob{SourcePath: path, RelPath: relPath})
+				fmt.Fprintf(os.Stderr, "[DEBUG] Discovered file: %s\n", path)
 			}
 		}
 

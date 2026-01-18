@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -47,15 +48,15 @@ type CopyResult struct {
 func RobustCopy(sourcePath, sourceRoot, destRoot string, progressChan chan<- int64) *CopyResult {
 	result := &CopyResult{}
 
-	// Calculate relative path from source root
-	relPath, err := filepath.Rel(sourceRoot, sourcePath)
+	// Normalize phone path to be protocol-agnostic
+	normalizedPath, err := normalizePhonePath(sourcePath, sourceRoot)
 	if err != nil {
-		result.Error = fmt.Errorf("failed to calculate relative path: %w", err)
+		result.Error = fmt.Errorf("failed to normalize phone path: %w", err)
 		return result
 	}
 
-	// Build destination path preserving directory structure
-	destPath := filepath.Join(destRoot, relPath)
+	// Build destination path using normalized path (protocol-agnostic)
+	destPath := filepath.Join(destRoot, normalizedPath)
 
 	// Ensure destination directory exists
 	destDir := filepath.Dir(destPath)
@@ -190,10 +191,11 @@ func copyWithTimeout(src io.Reader, dst io.Writer, timeout time.Duration, progre
 		}
 	}()
 
-	// Wrap source reader to track progress
+	// Wrap source reader to track progress (with context for cancellation)
 	progressReader := &progressReader{
 		Reader:   src,
 		progress: prog,
+		ctx:      ctx, // Store context to check in Read()
 	}
 
 	// Perform the copy
@@ -237,9 +239,24 @@ func copyWithTimeout(src io.Reader, dst io.Writer, timeout time.Duration, progre
 type progressReader struct {
 	io.Reader
 	progress *progressTracker
+	ctx      context.Context // Context to check for cancellation
 }
 
 func (pr *progressReader) Read(p []byte) (n int, err error) {
+	// Check if context is cancelled BEFORE attempting to read
+	// This allows us to abort the read immediately when stalled
+	select {
+	case <-pr.ctx.Done():
+		// Context cancelled (stall detected) - return error to abort io.Copy
+		// Use "stalled" in error message so worker recognizes it as a timeout
+		pr.progress.Lock()
+		elapsed := time.Since(pr.progress.lastTime)
+		pr.progress.Unlock()
+		return 0, fmt.Errorf("copy stalled: no progress for %v", elapsed)
+	default:
+		// Context not cancelled, proceed with read
+	}
+
 	n, err = pr.Reader.Read(p)
 	if n > 0 {
 		pr.progress.Lock()
@@ -266,4 +283,32 @@ func calculateFileHash(filePath string) (string, error) {
 	}
 
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// normalizePhonePath extracts the actual phone path from protocol-specific mount paths
+// Returns the logical path on the phone, protocol-agnostic
+// This ensures the same file from different protocols (gphoto2, MTP, ADB) maps to the same destination
+func normalizePhonePath(sourcePath, sourceRoot string) (string, error) {
+	// Calculate relative path from source root
+	relPath, err := filepath.Rel(sourceRoot, sourcePath)
+	if err != nil {
+		return "", err
+	}
+
+	// Protocol-specific path prefixes to strip:
+
+	// MTP: "Internal shared storage/" or "SD card/" prefix
+	if strings.HasPrefix(relPath, "Internal shared storage/") {
+		relPath = strings.TrimPrefix(relPath, "Internal shared storage/")
+	} else if strings.HasPrefix(relPath, "SD card/") {
+		relPath = strings.TrimPrefix(relPath, "SD card/")
+	}
+
+	// ADB: calculateRelPathFromAndroid already handles /sdcard prefix removal
+	// So no changes needed here for ADB
+
+	// gphoto2: Usually starts directly with DCIM/, Pictures/, etc. (no prefix)
+	// So no changes needed
+
+	return relPath, nil
 }

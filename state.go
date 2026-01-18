@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,7 +15,8 @@ import (
 type StateManager struct {
 	mu                 sync.Mutex
 	stateFile          string
-	stateMap           map[string]string   // path -> hash (for completed files)
+	stateMap           map[string]string   // path -> hash (for completed files) - OLD FORMAT
+	hashMap            map[string]string   // hash -> normalizedPath (for hash-based lookup) - NEW FORMAT
 	failureMap         map[string]int      // path -> failure count
 	deletedMap         map[string]string   // path -> hash (for deleted files)
 	cleanupFailureMap  map[string]int      // path -> cleanup failure count
@@ -32,6 +34,7 @@ func NewStateManager(stateFile string) (*StateManager, error) {
 	sm := &StateManager{
 		stateFile:          stateFile,
 		stateMap:           make(map[string]string),
+		hashMap:            make(map[string]string), // NEW: hash-based lookup
 		failureMap:         make(map[string]int),
 		deletedMap:         make(map[string]string),
 		cleanupFailureMap:  make(map[string]int),
@@ -107,11 +110,13 @@ func (sm *StateManager) loadState() error {
 	defer file.Close()
 
 	// Pattern for completed: - [x] /path/to/file | Hash: <hash>
+	// Pattern for completed (new hash-based): - [x] Hash: <hash> | Path: <normalizedPath> | SourcePath: <sourcePath>
 	// Pattern for failed: - [ ] /path/to/file | Failures: <count>
 	// Pattern for deleted: - [d] /path/to/file | Hash: <hash> | Deleted: <timestamp>
 	// Pattern for cleanup failures: - [c] /path/to/file | CleanupFailures: <count>
 	// Pattern for directories: - [dir] /path/to/dir | Status: <status>
 	completedPattern := regexp.MustCompile(`^\s*-\s+\[x\]\s+(.+?)(?:\s*\|\s*Hash:\s*(\S+))?\s*$`)
+	completedHashPattern := regexp.MustCompile(`^\s*-\s+\[x\]\s+Hash:\s*(\S+)\s*\|\s*Path:\s*(.+?)(?:\s*\|\s*SourcePath:\s*(.+?))?\s*$`)
 	failedPattern := regexp.MustCompile(`^\s*-\s+\[\s\]\s+(.+?)(?:\s*\|\s*Failures:\s*(\d+))?\s*$`)
 	deletedPattern := regexp.MustCompile(`^\s*-\s+\[d\]\s+(.+?)(?:\s*\|\s*Hash:\s*(\S+))?\s*$`)
 	cleanupFailurePattern := regexp.MustCompile(`^\s*-\s+\[c\]\s+(.+?)(?:\s*\|\s*CleanupFailures:\s*(\d+))?\s*$`)
@@ -121,11 +126,29 @@ func (sm *StateManager) loadState() error {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 
-		// Check for completed files
+		// Check for completed files (new hash-based format first)
+		if matches := completedHashPattern.FindStringSubmatch(line); matches != nil {
+			hash := matches[1]
+			normalizedPath := matches[2]
+			sourcePath := matches[3]
+			// Store in hash map (new format)
+			sm.hashMap[hash] = normalizedPath
+			// Also store in old format for backward compatibility
+			if sourcePath != "" {
+				sm.stateMap[sourcePath] = hash
+			}
+			continue
+		}
+
+		// Check for completed files (old path-based format)
 		if matches := completedPattern.FindStringSubmatch(line); matches != nil {
 			path := matches[1]
 			hash := matches[2]
 			sm.stateMap[path] = hash
+			// Also add to hash map for hash-based lookup (backward compatibility)
+			if hash != "" {
+				sm.hashMap[hash] = "" // Empty normalized path means we need to compute it
+			}
 			continue
 		}
 
@@ -178,11 +201,57 @@ func (sm *StateManager) loadState() error {
 }
 
 // IsDone checks if a file path is already marked as done
+// DEPRECATED: Use IsDoneForSource instead to filter by source path
 func (sm *StateManager) IsDone(path string) bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	_, exists := sm.stateMap[path]
 	return exists
+}
+
+// IsDoneForSource checks if a file path is marked as done AND matches the current source path prefix
+// This allows rediscovery when switching between mount points (e.g., MTP to gphoto2)
+// Files from old mounts won't block discovery of files on new mounts
+func (sm *StateManager) IsDoneForSource(path, sourceRoot string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	// Check if path exists in state map
+	_, exists := sm.stateMap[path]
+	if !exists {
+		return false
+	}
+
+	// If sourceRoot provided, verify path is from current source (not old mount)
+	// This self-corrects by ignoring entries from different mount points
+	if sourceRoot != "" {
+		pathCleaned := filepath.Clean(path)
+		sourceCleaned := filepath.Clean(sourceRoot)
+		if !strings.HasPrefix(pathCleaned, sourceCleaned) {
+			// Path in state file is from a different source - don't consider it done
+			// This allows rediscovery when mount points change
+			return false
+		}
+	}
+
+	return true
+}
+
+// IsDoneByHash checks if a file hash is already marked as done (protocol-agnostic)
+// This is the primary method for checking if a file is already copied
+func (sm *StateManager) IsDoneByHash(hash string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	_, exists := sm.hashMap[hash]
+	return exists
+}
+
+// GetNormalizedPathByHash returns the normalized destination path for a given hash
+// Returns empty string if hash not found
+func (sm *StateManager) GetNormalizedPathByHash(hash string) string {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.hashMap[hash]
 }
 
 // ShouldSkipForResume - REMOVED: This was using lexicographic comparison which is incorrect
@@ -241,20 +310,25 @@ func (sm *StateManager) MarkSuccess() {
 }
 
 // MarkDone marks a file as done and appends to the state file
-func (sm *StateManager) MarkDone(sourcePath, hash string) error {
+// sourcePath: original source path (for backward compatibility)
+// hash: file hash (SHA256)
+// normalizedPath: protocol-agnostic normalized path (for new format)
+func (sm *StateManager) MarkDone(sourcePath, hash, normalizedPath string) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	// Update in-memory map
-	sm.stateMap[sourcePath] = hash
+	// Update in-memory maps
+	sm.stateMap[sourcePath] = hash    // Old format (backward compatibility)
+	sm.hashMap[hash] = normalizedPath // New format (hash-based)
 
 	// Update last completed path if this file comes after it lexicographically
 	if sourcePath > sm.lastCompletedPath {
 		sm.lastCompletedPath = sourcePath
 	}
 
-	// Append to file
-	line := fmt.Sprintf("- [x] %s | Hash: %s\n", sourcePath, hash)
+	// Append to file using new hash-based format (more efficient and protocol-agnostic)
+	// Format: - [x] Hash: <hash> | Path: <normalizedPath> | SourcePath: <sourcePath>
+	line := fmt.Sprintf("- [x] Hash: %s | Path: %s | SourcePath: %s\n", hash, normalizedPath, sourcePath)
 	if _, err := sm.writer.WriteString(line); err != nil {
 		return fmt.Errorf("failed to write to state file: %w", err)
 	}

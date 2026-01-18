@@ -84,16 +84,23 @@ func (adb *ADBScanner) Scan(ctx context.Context, root string, jobs chan<- FileJo
 				sentFiles[androidPath] = true
 				mu.Unlock()
 
-				// Calculate relative path from root
-				relPath, err := calculateRelPathFromAndroid(androidPath, androidRoot)
-				if err != nil {
-					errors <- fmt.Errorf("failed to calculate relative path for %s: %w", androidPath, err)
-					continue
-				}
+			// Calculate relative path from root
+			relPath, err := calculateRelPathFromAndroid(androidPath, androidRoot)
+			if err != nil {
+				errors <- fmt.Errorf("failed to calculate relative path for %s: %w", androidPath, err)
+				continue
+			}
 
-				// Send job immediately (priority paths are processed first)
-				select {
-				case jobs <- FileJob{SourcePath: androidPath, RelPath: relPath}:
+			// Check if file should be excluded (using normalized path)
+			// ADB paths are already normalized (no /sdcard prefix after calculateRelPathFromAndroid)
+			if shouldExcludeFile(relPath) {
+				// Skip excluded files (cache, temp, system files)
+				continue
+			}
+
+			// Send job immediately (priority paths are processed first)
+			select {
+			case jobs <- FileJob{SourcePath: androidPath, RelPath: relPath}:
 				case <-ctx.Done():
 					cmd.Process.Kill()
 					return
@@ -174,6 +181,12 @@ func (adb *ADBScanner) Scan(ctx context.Context, root string, jobs chan<- FileJo
 				continue
 			}
 
+			// Check if file should be excluded (using normalized path)
+			if shouldExcludeFile(relPath) {
+				// Skip excluded files (cache, temp, system files)
+				continue
+			}
+
 			// Send job
 			select {
 			case jobs <- FileJob{SourcePath: androidPath, RelPath: relPath}:
@@ -236,14 +249,22 @@ func NewADBCopier() *ADBCopier {
 
 // Copy copies a file using adb pull
 func (ac *ADBCopier) Copy(ctx context.Context, sourcePath, sourceRoot, destRoot string, progressChan chan<- int64) (int64, error) {
-	// Calculate relative path from source root
+	// Calculate relative path from source root (ADB already normalizes /sdcard prefix)
 	relPath, err := calculateRelPathFromAndroid(sourcePath, sourceRoot)
 	if err != nil {
 		return 0, fmt.Errorf("failed to calculate relative path: %w", err)
 	}
 
-	// Build destination path preserving directory structure
-	destPath := filepath.Join(destRoot, relPath)
+	// ADB paths are already normalized (calculateRelPathFromAndroid removes /sdcard prefix)
+	// But we still use normalizePhonePath for consistency and to handle any edge cases
+	normalizedPath, err := normalizePhonePath(sourcePath, sourceRoot)
+	if err != nil {
+		// Fallback to relPath if normalization fails
+		normalizedPath = relPath
+	}
+
+	// Build destination path using normalized path (protocol-agnostic)
+	destPath := filepath.Join(destRoot, normalizedPath)
 
 	// Ensure destination directory exists
 	destDir := filepath.Dir(destPath)
