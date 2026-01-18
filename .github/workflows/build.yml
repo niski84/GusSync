@@ -1,0 +1,133 @@
+name: Build Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            ext: ''
+          - os: ubuntu-latest
+            arch: arm64
+            ext: ''
+          - os: windows-latest
+            arch: amd64
+            ext: '.exe'
+          - os: windows-latest
+            arch: 386
+            ext: '.exe'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-s -w" -o gussync${{ matrix.ext }} .
+          ls -lh gussync${{ matrix.ext }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gussync-${{ matrix.os }}-${{ matrix.arch }}
+          path: gussync${{ matrix.ext }}
+          retention-days: 30
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: Release ${{ steps.tag.outputs.tag }}
+          body: |
+            ## GusSync ${{ steps.tag.outputs.tag }}
+
+            ### Downloads
+
+            **Linux (amd64)**
+            - [gussync-linux-amd64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/gussync-linux-amd64)
+
+            **Linux (arm64)**
+            - [gussync-linux-arm64](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/gussync-linux-arm64)
+
+            **Windows (amd64)**
+            - [gussync-windows-amd64.exe](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/gussync-windows-amd64.exe)
+
+            **Windows (386)**
+            - [gussync-windows-386.exe](https://github.com/${{ github.repository }}/releases/download/${{ steps.tag.outputs.tag }}/gussync-windows-386.exe)
+
+            ### Installation
+
+            **Linux:**
+            ```bash
+            chmod +x gussync-linux-amd64
+            sudo mv gussync-linux-amd64 /usr/local/bin/gussync
+            ```
+
+            **Windows:**
+            Download the appropriate .exe file and add it to your PATH.
+
+            ### Features
+
+            - Dual mode support (mount/ADB)
+            - Connection health monitoring
+            - Discovery verification
+            - Stall detection and recovery
+            - Hash verification with auto re-copy
+            - Resumable backups with Markdown state
+            - Real-time progress tracking
+
+            See [README.md](README.md) for full documentation.
+          files: |
+            artifacts/gussync-ubuntu-latest-amd64/gussync
+            artifacts/gussync-ubuntu-latest-arm64/gussync
+            artifacts/gussync-windows-latest-amd64/gussync.exe
+            artifacts/gussync-windows-latest-386/gussync.exe
+          draft: false
+          prerelease: false
+
