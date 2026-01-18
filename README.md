@@ -1,30 +1,74 @@
-# GusSync
+<div align="center">
+  
+![GusSync Logo](logo.png)
+  
+</div>
 
-A robust, lightweight CLI tool for backing up files from phone filesystems mounted via MTP/FUSE on Linux. Designed to handle large filesystems efficiently without enumerating the entire tree before copying.
+# 
+<img src="bullet.png" width="16" height="16"> GusSync
 
-## Features
+**"Digs deep. Fetches everything. Never lets go."**
 
-- **Streaming Architecture**: Discovers and copies files simultaneously (no sequential enumeration)
-- **Dual Mode Support**: 
-  - `mount` mode: Uses filesystem paths (MTP/FUSE/GVFS/gphoto2)
-  - `adb` mode: Uses Android Debug Bridge for file discovery and copying
-- **Resumable Backups**: Tracks progress in human-readable Markdown (`gus_state.md`)
-- **Connection Health Monitoring**: Automatically detects connection drops and exits gracefully
-- **Discovery Verification**: Counts and verifies discovered files vs actual files in source
-- **Intelligent Prioritization**: Processes common Android paths first (DCIM, Camera, Documents, etc.)
-- **Stall Detection**: Automatically handles stalled file transfers (30s timeout)
-- **Hash Verification**: SHA256 hash verification for all files with automatic re-copy on mismatch
-- **Error Logging**: All errors logged to `gus_errors.log` with timestamps
-- **Real-time Progress**: Live statistics with per-worker status, transfer speeds, and MB delta
+GusSync is a CLI backup tool inspired by my Border Terrier, Gus.
 
-## Installation
+If you have ever tried to back up a large Android phone on Linux via MTP/FUSE, you know the pain. You mount the drive. You drag the folder. The file manager freezes. It tries to "prepare" the copy for 20 minutes. Then it times out. You try again. It fails halfway through. You scream at your monitor.
 
-### Prerequisites
+I built GusSync because I was tired of being polite to a fragile filesystem. I needed a tool that acts like a terrier with a flirt pole: **ravenous, high-energy, and completely unwilling to give up.**
 
-- Go 1.18 or later
-- Linux (tested on Ubuntu/Debian)
+### Why is this different?
 
-### Build
+Standard file managers (Nemo, Nautilus) try to be elegant. They want to list every single file before they copy one byte. On a phone with 100,000 photos, this causes the connection to hang.
+
+**GusSync is not elegant. It is brute force.**
+
+* 
+  <img src="bullet.png" width="16" height="16"> **It Attacks Immediately:** It starts copying the *second* it finds a file. It doesn't wait to map the whole tree.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **It Plays Tug-of-War:** If a file transfer stalls or the connection drops, GusSync doesn't crash. It detects the slack line, drops the bad thread, and lunges again.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **It Remembers the Scent:** It tracks every single file in a Markdown checklist (`gus_state.md`). If the process dies (or you rage-quit), you just run it again. It sees what it already fetched and immediately resumes digging for new files.
+
+---
+
+## 
+<img src="bullet.png" width="16" height="16"> Key Features
+
+* 
+  <img src="bullet.png" width="16" height="16"> **The "Chase" Mode (Streaming):** Discovers and copies files simultaneously. No waiting for "calculating time remaining..."
+
+* 
+  <img src="bullet.png" width="16" height="16"> **Dual Mode Hunting:**
+
+    * **`mount` mode:** For when you want to fight with the standard filesystem paths (MTP/GVFS/gphoto2).
+
+    * **`adb` mode:** The "Nuclear Option." Bypasses the filesystem entirely and uses the Android Debug Bridge to pull files directly.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **Total Recall:** Uses a human-readable Markdown file to track progress. It knows exactly what it has already buried in your hard drive.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **The Guard Dog (Health Monitoring):** checks the connection every 30 seconds. If the phone disconnects, it logs the error and exits gracefully so you can reconnect and resume instantly.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **Scent Verification:** Counts files found vs. files copied. It knows if it missed something.
+
+* 
+  <img src="bullet.png" width="16" height="16"> **Stall Detection:** If a file transfer hangs for 30 seconds, GusSync cuts the line and retries.
+
+## 
+<img src="bullet.png" width="16" height="16"> Installation
+
+**Prerequisites**
+
+* Go 1.18 or later
+
+* Linux (Ubuntu/Debian recommended)
+
+* *A stubborn attitude*
+
+**Build**
 
 ```bash
 git clone <repository-url>
@@ -44,8 +88,8 @@ go build -o gussync .
 
 **Mount Mode (MTP/gphoto2):**
 ```bash
-./gussync -source /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf \
-          -dest /media/nick/New\ Volume/2026/phone\ backup \
+./gussync -source /run/user/1000/gvfs/gphoto2:host=Your_Device_Name \
+          -dest /mnt/backup/phone \
           -mode mount \
           -workers 1
 ```
@@ -53,7 +97,7 @@ go build -o gussync .
 **ADB Mode:**
 ```bash
 ./gussync -source /sdcard \
-          -dest /media/nick/New\ Volume/2026/phone\ backup \
+          -dest /mnt/backup/phone \
           -mode adb \
           -workers 2
 ```
@@ -80,21 +124,32 @@ Use the provided test script for easier execution:
 ## Recent Changes
 
 ### Connection Health Monitoring (Latest)
-- **Periodic connection checks**: Every 30 seconds, verifies source path is still accessible
-- **Connection drop detection**: Automatically detects when MTP/gphoto2 connection drops
-- **Graceful exit**: Exits cleanly with error message instead of silently failing
-- **Progress preservation**: State is flushed before exit, allowing resume
+* 
+  <img src="bullet.png" width="16" height="16"> **Periodic connection checks**: Every 30 seconds, verifies source path is still accessible
+* 
+  <img src="bullet.png" width="16" height="16"> **Connection drop detection**: Automatically detects when MTP/gphoto2 connection drops
+* 
+  <img src="bullet.png" width="16" height="16"> **Graceful exit**: Exits cleanly with error message instead of silently failing
+* 
+  <img src="bullet.png" width="16" height="16"> **Progress preservation**: State is flushed before exit, allowing resume
 
 ### Discovery Verification (Latest)
-- **File discovery counting**: Tracks how many files were discovered during scan
-- **Actual file count comparison**: After backup, counts actual files in source directory
-- **Missing file warnings**: Warns if discovered count < actual count with percentage missing
-- **Helps detect incomplete scans**: Alerts when directories timeout or fail during scanning
+* 
+  <img src="bullet.png" width="16" height="16"> **File discovery counting**: Tracks how many files were discovered during scan
+* 
+  <img src="bullet.png" width="16" height="16"> **Actual file count comparison**: After backup, counts actual files in source directory
+* 
+  <img src="bullet.png" width="16" height="16"> **Missing file warnings**: Warns if discovered count < actual count with percentage missing
+* 
+  <img src="bullet.png" width="16" height="16"> **Helps detect incomplete scans**: Alerts when directories timeout or fail during scanning
 
 ### Verification Improvements
-- **Source path filtering**: Verification now only checks files from current source path
-- **Prevents cross-mount verification**: Filters out files from previous runs with different mount points
-- **Progress display**: Shows verification progress with file count and percentage
+* 
+  <img src="bullet.png" width="16" height="16"> **Source path filtering**: Verification now only checks files from current source path
+* 
+  <img src="bullet.png" width="16" height="16"> **Prevents cross-mount verification**: Filters out files from previous runs with different mount points
+* 
+  <img src="bullet.png" width="16" height="16"> **Progress display**: Shows verification progress with file count and percentage
 
 ## Troubleshooting (Linux)
 
@@ -143,7 +198,7 @@ adb devices
 
 # Expected output:
 # List of devices attached
-# 8997acf    device
+# abc123def    device
 ```
 
 If device shows `unauthorized`:
@@ -169,7 +224,7 @@ If device doesn't appear:
 ls -la /run/user/$UID/gvfs/
 
 # Look for:
-# mtp:host=Xiaomi_Mi_11_Ultra_8997acf
+# mtp:host=Your_Device_Name
 ```
 
 **gphoto2 mounts (Picture mode):**
@@ -178,7 +233,7 @@ ls -la /run/user/$UID/gvfs/
 ls -la /run/user/$UID/gvfs/
 
 # Look for:
-# gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf
+# gphoto2:host=Your_Device_Name
 ```
 
 **Check if mounted:**
@@ -187,7 +242,7 @@ ls -la /run/user/$UID/gvfs/
 gio mount -l
 
 # Or check mount point directly
-ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
+ls /run/user/1000/gvfs/gphoto2:host=Your_Device_Name/
 ```
 
 #### Mount Troubleshooting
@@ -228,9 +283,12 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
 #### Problem: "Backup complete" but missing many files
 
 **Symptoms:**
-- Tool reports backup complete
-- Actual file count is much higher than discovered count
-- Verification shows files missing from source
+* 
+  <img src="bullet.png" width="16" height="16"> Tool reports backup complete
+* 
+  <img src="bullet.png" width="16" height="16"> Actual file count is much higher than discovered count
+* 
+  <img src="bullet.png" width="16" height="16"> Verification shows files missing from source
 
 **Solutions:**
 
@@ -260,19 +318,26 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
 #### Problem: Connection keeps dropping
 
 **Symptoms:**
-- "CRITICAL: Connection dropped" errors
-- Backup stops mid-way
-- Files timeout or fail to copy
+* 
+  <img src="bullet.png" width="16" height="16"> "CRITICAL: Connection dropped" errors
+* 
+  <img src="bullet.png" width="16" height="16"> Backup stops mid-way
+* 
+  <img src="bullet.png" width="16" height="16"> Files timeout or fail to copy
 
 **Solutions:**
 
 1. **Check USB connection:**
-   - Use a high-quality USB cable (data-capable, not charge-only)
-   - Try different USB ports (prefer USB 2.0 ports)
-   - Avoid USB hubs - connect directly to computer
+   * 
+  <img src="bullet.png" width="16" height="16"> Use a high-quality USB cable (data-capable, not charge-only)
+   * 
+  <img src="bullet.png" width="16" height="16"> Try different USB ports (prefer USB 2.0 ports)
+   * 
+  <img src="bullet.png" width="16" height="16"> Avoid USB hubs - connect directly to computer
 
 2. **Check power management:**
-   - Disable USB selective suspend:
+   * 
+  <img src="bullet.png" width="16" height="16"> Disable USB selective suspend:
      ```bash
      # Check current setting
      cat /sys/module/usbcore/parameters/usbfs_memory_mb
@@ -282,8 +347,10 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
      ```
 
 3. **Check phone power settings:**
-   - Disable "Battery saver" mode during backup
-   - Keep phone screen on (prevents Android from suspending USB)
+   * 
+  <img src="bullet.png" width="16" height="16"> Disable "Battery saver" mode during backup
+   * 
+  <img src="bullet.png" width="16" height="16"> Keep phone screen on (prevents Android from suspending USB)
 
 4. **Reduce workers:**
    ```bash
@@ -292,18 +359,23 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
    ```
 
 5. **Monitor connection:**
-   - Watch `gus_errors.log` for connection errors
-   - Check if mount point still accessible:
+   * 
+  <img src="bullet.png" width="16" height="16"> Watch `gus_errors.log` for connection errors
+   * 
+  <img src="bullet.png" width="16" height="16"> Check if mount point still accessible:
      ```bash
-     ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
+     ls /run/user/1000/gvfs/gphoto2:host=Your_Device_Name/
      ```
 
 #### Problem: Directories timeout during scanning
 
 **Symptoms:**
-- Error log shows "directory read timeout: /path/to/dir"
-- Files in those directories are not discovered
-- Discovered count < actual file count
+* 
+  <img src="bullet.png" width="16" height="16"> Error log shows "directory read timeout: /path/to/dir"
+* 
+  <img src="bullet.png" width="16" height="16"> Files in those directories are not discovered
+* 
+  <img src="bullet.png" width="16" height="16"> Discovered count < actual file count
 
 **Solutions:**
 
@@ -315,24 +387,34 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
    ```
 
 2. **Remount the device:**
-   - Eject device from file manager
-   - Reconnect and remount
-   - Try backup again
+   * 
+  <img src="bullet.png" width="16" height="16"> Eject device from file manager
+   * 
+  <img src="bullet.png" width="16" height="16"> Reconnect and remount
+   * 
+  <img src="bullet.png" width="16" height="16"> Try backup again
 
 3. **Use ADB mode:**
-   - ADB is generally more reliable for large directory trees
-   - Switch to `-mode adb` for better stability
+   * 
+  <img src="bullet.png" width="16" height="16"> ADB is generally more reliable for large directory trees
+   * 
+  <img src="bullet.png" width="16" height="16"> Switch to `-mode adb` for better stability
 
 4. **Resume after timeout:**
-   - The tool saves progress in `gus_state.md`
-   - Simply run again - it will skip already-copied files
-   - Multiple runs may be needed to catch all files
+   * 
+  <img src="bullet.png" width="16" height="16"> The tool saves progress in `gus_state.md`
+   * 
+  <img src="bullet.png" width="16" height="16"> Simply run again - it will skip already-copied files
+   * 
+  <img src="bullet.png" width="16" height="16"> Multiple runs may be needed to catch all files
 
 #### Problem: ADB device not found
 
 **Symptoms:**
-- `adb devices` shows no devices
-- "adb command not found" error
+* 
+  <img src="bullet.png" width="16" height="16"> `adb devices` shows no devices
+* 
+  <img src="bullet.png" width="16" height="16"> "adb command not found" error
 
 **Solutions:**
 
@@ -350,12 +432,16 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
    ```
 
 3. **Check USB authorization:**
-   - Look for authorization prompt on phone
-   - Check "Always allow from this computer"
+   * 
+  <img src="bullet.png" width="16" height="16"> Look for authorization prompt on phone
+   * 
+  <img src="bullet.png" width="16" height="16"> Check "Always allow from this computer"
 
 4. **Check USB mode:**
-   - Phone must be in "File Transfer" or "MTP" mode
-   - Not "Charging only" mode
+   * 
+  <img src="bullet.png" width="16" height="16"> Phone must be in "File Transfer" or "MTP" mode
+   * 
+  <img src="bullet.png" width="16" height="16"> Not "Charging only" mode
 
 5. **Check udev rules:**
    ```bash
@@ -367,26 +453,35 @@ ls /run/user/1000/gvfs/gphoto2:host=Xiaomi_Mi_11_Ultra_8997acf/
 
 ### General Tips
 
-1. **Start with 1 worker**: MTP/gphoto2 protocols are sensitive to concurrent connections. Start with `-workers 1` and increase only if stable.
+* 
+  <img src="bullet.png" width="16" height="16"> **Start with 1 worker**: MTP/gphoto2 protocols are sensitive to concurrent connections. Start with `-workers 1` and increase only if stable.
 
-2. **Monitor error log**: Keep `gus_errors.log` open during backup:
+* 
+  <img src="bullet.png" width="16" height="16"> **Monitor error log**: Keep `gus_errors.log` open during backup:
    ```bash
    tail -f /path/to/dest/mount/gus_errors.log
    ```
 
-3. **Check state file**: Progress is saved in `gus_state.md`. You can inspect it to see what's been backed up.
+* 
+  <img src="bullet.png" width="16" height="16"> **Check state file**: Progress is saved in `gus_state.md`. You can inspect it to see what's been backed up.
 
-4. **Resume is automatic**: If backup is interrupted, simply run the same command again. It will skip already-copied files.
+* 
+  <img src="bullet.png" width="16" height="16"> **Resume is automatic**: If backup is interrupted, simply run the same command again. It will skip already-copied files.
 
-5. **Use ADB for reliability**: If MTP/gphoto2 is unstable, ADB mode is often more reliable for large backups.
+* 
+  <img src="bullet.png" width="16" height="16"> **Use ADB for reliability**: If MTP/gphoto2 is unstable, ADB mode is often more reliable for large backups.
 
-6. **Verify after backup**: The tool automatically verifies all files after backup. Check the verification results for any issues.
+* 
+  <img src="bullet.png" width="16" height="16"> **Verify after backup**: The tool automatically verifies all files after backup. Check the verification results for any issues.
 
 ## Files Created
 
-- `gus_state.md`: Markdown file tracking completed files and their hashes
-- `gus_errors.log`: Error log with timestamps for all errors
-- Both files are in the destination directory (under `mount/` or `adb/` subdirectory)
+* 
+  <img src="bullet.png" width="16" height="16"> `gus_state.md`: Markdown file tracking completed files and their hashes
+* 
+  <img src="bullet.png" width="16" height="16"> `gus_errors.log`: Error log with timestamps for all errors
+* 
+  <img src="bullet.png" width="16" height="16"> Both files are in the destination directory (under `mount/` or `adb/` subdirectory)
 
 ## Architecture
 

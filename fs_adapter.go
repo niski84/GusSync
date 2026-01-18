@@ -49,6 +49,7 @@ func getPathPriority(relPath string, rootPath string) int {
 // FSScanner implements Scanner for filesystem-based scanning
 type FSScanner struct {
 	closeJobChan func() // Function to safely close jobChan (uses sync.Once)
+	stateManager *StateManager // State manager for directory tracking
 }
 
 // NewFSScanner creates a new filesystem scanner
@@ -56,6 +57,11 @@ func NewFSScanner(closeJobChan func()) *FSScanner {
 	return &FSScanner{
 		closeJobChan: closeJobChan,
 	}
+}
+
+// SetStateManager sets the state manager for directory tracking
+func (fs *FSScanner) SetStateManager(sm *StateManager) {
+	fs.stateManager = sm
 }
 
 // Scan discovers files using filesystem traversal
@@ -109,11 +115,50 @@ func (fs *FSScanner) Scan(ctx context.Context, root string, jobs chan<- FileJob,
 	
 	// Stop health checker when scan completes
 	close(healthDone)
+
+	// Print directory discovery summary
+	if fs.stateManager != nil {
+		fs.stateManager.mu.Lock()
+		completedDirs := 0
+		timeoutDirs := 0
+		errorDirs := 0
+		for _, status := range fs.stateManager.dirMap {
+			switch status {
+			case "completed":
+				completedDirs++
+			case "timeout":
+				timeoutDirs++
+			case "error":
+				errorDirs++
+			}
+		}
+		fs.stateManager.mu.Unlock()
+
+		if timeoutDirs > 0 || errorDirs > 0 {
+			fmt.Fprintf(os.Stderr, "\nDirectory discovery summary:\n")
+			fmt.Fprintf(os.Stderr, "  Fully scanned: %d directories\n", completedDirs)
+			if timeoutDirs > 0 {
+				fmt.Fprintf(os.Stderr, "  Timed out: %d directories (will retry on next run)\n", timeoutDirs)
+			}
+			if errorDirs > 0 {
+				fmt.Fprintf(os.Stderr, "  Errors: %d directories (will retry on next run)\n", errorDirs)
+			}
+		}
+	}
 }
 
 // scanDir recursively scans a directory with timeout protection
 func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs chan<- FileJob, errors chan<- error, wg *sync.WaitGroup) {
 	defer wg.Done()
+
+	// Check if this directory has already been fully scanned (resumable)
+	if fs.stateManager != nil {
+		if fs.stateManager.IsDirScanned(current) {
+			// Directory already fully scanned, skip it
+			return
+		}
+	}
+
 	// Create a context with timeout for this directory read
 	dirCtx, cancel := context.WithTimeout(ctx, DirReadTimeout)
 	defer cancel()
@@ -158,40 +203,47 @@ func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs cha
 		}
 	}()
 
+	// Track if we successfully processed all entries
+	allEntriesProcessed := false
+	subdirsToProcess := make([]string, 0)
+	filesToProcess := make([]FileJob, 0)
+
 	// Process entries with timeout
 	for {
 		select {
 		case <-dirCtx.Done():
-			errors <- fmt.Errorf("directory read timeout: %s", current)
-			return
+			// Directory read timed out - mark as timeout but continue with what we have
+			if fs.stateManager != nil {
+				fs.stateManager.MarkDirStatus(current, "timeout")
+			}
+			errors <- fmt.Errorf("directory read timeout: %s (continuing with discovered entries)", current)
+			// Process what we've collected so far, then return
+			allEntriesProcessed = true
+			break
 		case result, ok := <-entriesChan:
 			if !ok {
 				// Channel closed, directory read complete
-				return
+				allEntriesProcessed = true
+				break
 			}
 
 			if result.err != nil {
-				// Report error but continue
-				errors <- fmt.Errorf("error reading %s: %w", current, result.err)
-				return
+				// Error reading directory - mark as error but continue with what we have
+				if fs.stateManager != nil {
+					fs.stateManager.MarkDirStatus(current, "error")
+				}
+				errors <- fmt.Errorf("error reading %s: %w (continuing with discovered entries)", current, result.err)
+				// Process what we've collected so far, then return
+				allEntriesProcessed = true
+				break
 			}
 
 			entry := result.entry
 			path := filepath.Join(current, entry.Name())
 
 			if entry.IsDir() {
-				// For priority paths, process sequentially (to ensure they're discovered first)
-				// For other paths, process concurrently
-				pri := getPathPriority(path, root)
-				if pri < 100 {
-					// Priority path - process immediately (sequentially)
-					wg.Add(1)
-					fs.scanDir(ctx, root, path, jobs, errors, wg)
-				} else {
-					// Non-priority path - process concurrently
-					wg.Add(1)
-					go fs.scanDir(ctx, root, path, jobs, errors, wg)
-				}
+				// Collect subdirectories to process after we finish reading entries
+				subdirsToProcess = append(subdirsToProcess, path)
 			} else {
 				// Calculate relative path
 				relPath, err := filepath.Rel(root, path)
@@ -199,15 +251,59 @@ func (fs *FSScanner) scanDir(ctx context.Context, root, current string, jobs cha
 					errors <- fmt.Errorf("failed to calculate relative path for %s: %w", path, err)
 					continue
 				}
+				// Track discovered file in this directory
+				if fs.stateManager != nil {
+					fs.stateManager.AddDiscoveredFileToDir(current, path)
+				}
+				// Collect files to process
+				filesToProcess = append(filesToProcess, FileJob{SourcePath: path, RelPath: relPath})
+			}
+		}
 
-				// Stream file job immediately
-				select {
-				case jobs <- FileJob{SourcePath: path, RelPath: relPath}:
-				case <-dirCtx.Done():
-					return
-				case <-ctx.Done():
-					// Context cancelled (shutdown requested)
-					return
+		if allEntriesProcessed {
+			break
+		}
+	}
+
+	// Now process all collected files (send to jobs channel)
+	for _, fileJob := range filesToProcess {
+		select {
+		case jobs <- fileJob:
+		case <-ctx.Done():
+			// Context cancelled (shutdown requested)
+			return
+		}
+	}
+
+	// Process all collected subdirectories
+	for _, subdir := range subdirsToProcess {
+		// For priority paths, process sequentially (to ensure they're discovered first)
+		// For other paths, process concurrently
+		pri := getPathPriority(subdir, root)
+		if pri < 100 {
+			// Priority path - process immediately (sequentially)
+			wg.Add(1)
+			fs.scanDir(ctx, root, subdir, jobs, errors, wg)
+		} else {
+			// Non-priority path - process concurrently
+			wg.Add(1)
+			go fs.scanDir(ctx, root, subdir, jobs, errors, wg)
+		}
+	}
+
+	// Mark directory as completed only if ALL discovered files were successfully copied
+	if allEntriesProcessed && fs.stateManager != nil {
+		// Only mark as completed if we didn't timeout or error
+		status := fs.stateManager.GetDirStatus(current)
+		if status != "timeout" && status != "error" {
+			// Check if ALL discovered files in this directory were successfully copied
+			if fs.stateManager.AreAllDiscoveredFilesCompleted(current) {
+				// All discovered files are completed - mark as completed
+				fs.stateManager.MarkDirStatus(current, "completed")
+			} else {
+				// Some discovered files are not completed - mark as partial (will rescan on next run)
+				if status != "partial" {
+					fs.stateManager.MarkDirStatus(current, "partial")
 				}
 			}
 		}

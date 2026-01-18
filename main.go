@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -53,7 +54,7 @@ func init() {
 	flag.StringVar(&sourcePath, "source", "", "Source directory to backup (e.g., /mnt/phone or /sdcard for ADB)")
 	flag.StringVar(&destPath, "dest", "", "Destination directory (e.g., /mnt/ssd/backup)")
 	flag.IntVar(&numWorkers, "workers", 0, "Number of worker threads (default: number of CPU cores)")
-	flag.StringVar(&mode, "mode", "mount", "Backup mode: 'mount' (filesystem) or 'adb' (Android Debug Bridge)")
+	flag.StringVar(&mode, "mode", "mount", "Backup mode: 'mount' (filesystem), 'adb' (Android Debug Bridge), 'cleanup' (delete verified files from source), or 'verify' (verify existing backup)")
 }
 
 func main() {
@@ -66,9 +67,27 @@ func main() {
 	}
 
 	// Validate mode
-	if mode != "mount" && mode != "adb" {
-		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'mount' or 'adb'\n", mode)
+	if mode != "mount" && mode != "adb" && mode != "cleanup" && mode != "verify" {
+		fmt.Fprintf(os.Stderr, "Error: invalid mode '%s'. Must be 'mount', 'adb', 'cleanup', or 'verify'\n", mode)
 		os.Exit(1)
+	}
+
+	// Handle cleanup mode separately
+	if mode == "cleanup" {
+		if err := runCleanupMode(sourcePath, destPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cleanup failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	// Handle verify mode separately
+	if mode == "verify" {
+		if err := runVerifyMode(sourcePath, destPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: verification failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	// Validate source (only for mount mode)
@@ -175,7 +194,9 @@ func main() {
 		scanner = NewADBScanner(closeJobChan)
 		copier = NewADBCopier()
 	} else {
-		scanner = NewFSScanner(closeJobChan)
+		fsScanner := NewFSScanner(closeJobChan)
+		fsScanner.SetStateManager(stateManager)
+		scanner = fsScanner
 		copier = NewFSCopier()
 	}
 
@@ -384,24 +405,11 @@ func main() {
 		}
 	}
 
-	fmt.Println("\nBackup complete! Starting verification pass...")
-	fmt.Printf("Verifying %d files...\n", stateManager.GetStats())
+	fmt.Println("\nBackup complete!")
 	
-	// Verification pass: compare source and destination hashes
-	verifyResults := verifyBackup(sourcePath, destPath, stateManager, numWorkers, mode, copier)
-	
-	fmt.Printf("\nVerification complete:\n")
-	fmt.Printf("  Files verified: %d\n", verifyResults.verified)
-	fmt.Printf("  Files missing in source: %d\n", verifyResults.missingSource)
-	fmt.Printf("  Files missing in destination: %d\n", verifyResults.missingDest)
-	fmt.Printf("  Hash mismatches: %d\n", verifyResults.mismatches)
-	
-	if verifyResults.mismatches > 0 || verifyResults.missingDest > 0 {
-		fmt.Printf("\n⚠️  WARNING: Backup verification found issues!\n")
-		fmt.Printf("   Check the error output above for details.\n")
-		os.Exit(1)
-	} else {
-		fmt.Printf("\n✅ All files verified successfully!\n")
+	// Summarize error log if it exists
+	if errorLogFile != "" {
+		summarizeErrorLog(errorLogFile)
 	}
 }
 
@@ -482,10 +490,18 @@ func worker(ctx context.Context, id int, jobChan <-chan FileJob, errorChan chan<
 				
 				// Check if already done FIRST (before any other operations)
 				// This makes resuming much faster - skip immediately without any work
+				// BUT: Also verify destination file exists - if marked done but destination missing, recopy it
 				if stateManager.IsDone(sourcePath) {
-					// Silently skip - already completed
-					statsChan <- CopyStats{Skipped: true}
-					continue
+					// Verify destination file actually exists before skipping
+					destPathFull := filepath.Join(destRoot, relPath)
+					if _, err := os.Stat(destPathFull); err == nil {
+						// Destination exists - safe to skip
+						statsChan <- CopyStats{Skipped: true}
+						continue
+					}
+					// Destination missing - even though marked done, we need to recopy
+					// Log this anomaly and continue with copy
+					errorChan <- fmt.Errorf("file marked as done but destination missing: %s -> %s (will recopy)", sourcePath, destPathFull)
 				}
 
 				// Check if we should retry (hasn't failed 10 times yet)
@@ -975,4 +991,164 @@ func verifyBackup(sourceBase, destBase string, stateManager *StateManager, numWo
 	fmt.Printf("\rVerifying... %d/%d files (100.0%%) - Complete!\n", finalVerified, totalFiles)
 	
 	return results
+}
+
+// summarizeErrorLog reads and summarizes the error log file
+func summarizeErrorLog(errorLogFile string) {
+	file, err := os.Open(errorLogFile)
+	if os.IsNotExist(err) {
+		return // No error log yet
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to read error log: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	
+	var directoryTimeouts int
+	var directoryErrors int
+	var copyErrors int
+	var criticalErrors int
+	var hashMismatches int
+	var otherErrors int
+	
+	timeoutDirs := make(map[string]bool)
+	errorDirs := make(map[string]bool)
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Count different error types
+		if strings.Contains(line, "CRITICAL:") {
+			criticalErrors++
+		} else if strings.Contains(line, "directory read timeout") {
+			directoryTimeouts++
+			// Extract directory path from error
+			// Pattern: "directory read timeout: /path/to/dir" or "directory read timeout: /path/to/dir (continuing..."
+			if idx := strings.Index(line, "directory read timeout: "); idx >= 0 {
+				pathStart := idx + len("directory read timeout: ")
+				pathEnd := strings.Index(line[pathStart:], " (")
+				if pathEnd < 0 {
+					pathEnd = len(line)
+				} else {
+					pathEnd += pathStart
+				}
+				dir := strings.TrimSpace(line[pathStart:pathEnd])
+				if dir != "" {
+					timeoutDirs[dir] = true
+				}
+			}
+		} else if strings.Contains(line, "error reading") && strings.Contains(line, ":") {
+			directoryErrors++
+			// Extract directory path from error
+			// Pattern: "error reading /path/to/dir: ..."
+			if idx := strings.Index(line, "error reading "); idx >= 0 {
+				pathStart := idx + len("error reading ")
+				pathEnd := strings.Index(line[pathStart:], ":")
+				if pathEnd >= 0 {
+					dir := strings.TrimSpace(line[pathStart : pathStart+pathEnd])
+					if dir != "" {
+						errorDirs[dir] = true
+					}
+				}
+			}
+		} else if strings.Contains(line, "hash mismatch") {
+			hashMismatches++
+		} else if strings.Contains(line, "copy failed") || strings.Contains(line, "copy timed out") || strings.Contains(line, "stalled") {
+			copyErrors++
+		} else if strings.Contains(line, "[ERROR]") || strings.Contains(line, "failed to") {
+			otherErrors++
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: error reading error log: %v\n", err)
+		return
+	}
+	
+	// Print summary only if there are errors
+	totalErrors := directoryTimeouts + directoryErrors + copyErrors + criticalErrors + hashMismatches + otherErrors
+	
+	if totalErrors == 0 {
+		return // No errors, don't print anything
+	}
+	
+	fmt.Printf("\nError Log Summary:\n")
+	fmt.Printf("  Total errors: %d\n", totalErrors)
+	
+	if criticalErrors > 0 {
+		fmt.Printf("  🔴 Critical errors (connection lost): %d\n", criticalErrors)
+	}
+	if directoryTimeouts > 0 {
+		fmt.Printf("  ⏱️  Directory read timeouts: %d (affecting %d unique directories)\n", directoryTimeouts, len(timeoutDirs))
+		if len(timeoutDirs) > 0 && len(timeoutDirs) <= 10 {
+			fmt.Printf("     Timed-out directories:\n")
+			for dir := range timeoutDirs {
+				// Truncate long paths for display
+				displayDir := dir
+				if len(displayDir) > 70 {
+					displayDir = "..." + displayDir[len(displayDir)-67:]
+				}
+				fmt.Printf("       - %s\n", displayDir)
+			}
+		} else if len(timeoutDirs) > 10 {
+			fmt.Printf("     (showing first 10 of %d timed-out directories)\n", len(timeoutDirs))
+			count := 0
+			for dir := range timeoutDirs {
+				if count >= 10 {
+					break
+				}
+				displayDir := dir
+				if len(displayDir) > 70 {
+					displayDir = "..." + displayDir[len(displayDir)-67:]
+				}
+				fmt.Printf("       - %s\n", displayDir)
+				count++
+			}
+		}
+	}
+	if directoryErrors > 0 {
+		fmt.Printf("  ⚠️  Directory read errors: %d (affecting %d unique directories)\n", directoryErrors, len(errorDirs))
+		if len(errorDirs) > 0 && len(errorDirs) <= 10 {
+			fmt.Printf("     Error directories:\n")
+			for dir := range errorDirs {
+				displayDir := dir
+				if len(displayDir) > 70 {
+					displayDir = "..." + displayDir[len(displayDir)-67:]
+				}
+				fmt.Printf("       - %s\n", displayDir)
+			}
+		} else if len(errorDirs) > 10 {
+			fmt.Printf("     (showing first 10 of %d error directories)\n", len(errorDirs))
+			count := 0
+			for dir := range errorDirs {
+				if count >= 10 {
+					break
+				}
+				displayDir := dir
+				if len(displayDir) > 70 {
+					displayDir = "..." + displayDir[len(displayDir)-67:]
+				}
+				fmt.Printf("       - %s\n", displayDir)
+				count++
+			}
+		}
+	}
+	if hashMismatches > 0 {
+		fmt.Printf("  🔍 Hash mismatches: %d\n", hashMismatches)
+	}
+	if copyErrors > 0 {
+		fmt.Printf("  📁 File copy errors: %d\n", copyErrors)
+	}
+	if otherErrors > 0 {
+		fmt.Printf("  ⚠️  Other errors: %d\n", otherErrors)
+	}
+	
+	// If there are timeouts/errors, suggest action
+	if directoryTimeouts > 0 || directoryErrors > 0 {
+		fmt.Printf("\n  💡 Suggestion: Directories with timeouts/errors will be retried on next run.\n")
+		fmt.Printf("     Consider increasing directory timeout if timeouts persist.\n")
+	}
 }
