@@ -1,0 +1,29 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "GusSync",
+  "outputfilename": "gussync",
+  "frontend": {
+    "dir": "./frontend",
+    "install": "npm install",
+    "build": "npm run build",
+    "dev": "npm run dev",
+    "bridge": "frontend/src",
+    "serve": "vite",
+    "port": 34115
+  },
+  "author": {
+    "name": "",
+    "email": ""
+  },
+  "info": {
+    "productName": "GusSync",
+    "productVersion": "1.0.0",
+    "copyright": "",
+    "comments": "Digs deep. Fetches everything. Never lets go."
+  },
+  "nsisType": "multiple",
+  "obfuscated": false,
+  "garbleargs": ""
+}
+
+

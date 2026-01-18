@@ -1,0 +1,213 @@
+package services
+
+import (
+	"bufio"
+	"context"
+	"fmt"
+	"log"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+// Note: This file contains parsing functions for CLI output.
+// The full CopyService struct and methods are defined elsewhere or need to be restored.
+
+// streamOutput streams command output to UI events
+func (s *CopyService) streamOutput(ctx context.Context, pipe interface{}, jobID string, streamType string) {
+	scanner, ok := pipe.(*bufio.Scanner)
+	if !ok {
+		s.logger.Printf("[CopyService] streamOutput: Invalid pipe type for %s", streamType)
+		return
+	}
+
+	for scanner.Scan() {
+		// Check if context is cancelled
+		if ctx.Err() != nil {
+			return
+		}
+
+		line := scanner.Text()
+		s.logger.Printf("[CopyService] streamOutput [%s]: %s", streamType, line)
+
+		// Parse stats line: [150 files] Completed: 145 | Skipped: 3 | Failed: 2 | Speed: 12.34 MB/s | Delta: 25.67 MB
+		if strings.HasPrefix(line, "[") && strings.Contains(line, "files]") {
+			s.parseAndEmitStats(line, jobID)
+		}
+
+		// Parse worker status line: Copying: filename (X MB/Y MB Z%) or Copying: filename (X MB)
+		if strings.HasPrefix(line, "Copying:") {
+			s.parseAndEmitFileProgress(line, jobID)
+		}
+
+		// Parse discovery progress: [DEBUG scanDir] Reading directory: /path
+		if strings.Contains(line, "[DEBUG scanDir] Reading directory:") {
+			parts := strings.SplitN(line, "Reading directory:", 2)
+			if len(parts) == 2 {
+				dirPath := strings.TrimSpace(parts[1])
+				runtime.EventsEmit(s.ctx, "job:discovery", map[string]interface{}{
+					"id":      jobID,
+					"type":    "directory_scanning",
+					"path":    dirPath,
+					"message": fmt.Sprintf("Scanning directory: %s", dirPath),
+				})
+			}
+		}
+
+		// Parse directory stats: [DEBUG scanDir] Directory /path: X files, Y subdirectories
+		if strings.Contains(line, "[DEBUG scanDir] Directory") && strings.Contains(line, "files") && strings.Contains(line, "subdirectories") {
+			if match := regexp.MustCompile(`Directory\s+(.+?):\s+(\d+)\s+files,\s+(\d+)\s+subdirectories`).FindStringSubmatch(line); len(match) > 3 {
+				dirPath := match[1]
+				filesCount, _ := strconv.Atoi(match[2])
+				dirsCount, _ := strconv.Atoi(match[3])
+				
+				runtime.EventsEmit(s.ctx, "job:discovery", map[string]interface{}{
+					"id":         jobID,
+					"type":       "directory_stats",
+					"path":       dirPath,
+					"filesFound": filesCount,
+					"dirsFound":  dirsCount,
+				})
+			}
+		}
+
+		// Parse discovered files count: discoveredCount from scanner: X files
+		if strings.Contains(line, "discoveredCount") && strings.Contains(line, "files") {
+			if match := regexp.MustCompile(`discoveredCount.*?(\d+)\s+files`).FindStringSubmatch(line); len(match) > 1 {
+				count, _ := strconv.Atoi(match[1])
+				runtime.EventsEmit(s.ctx, "job:discovery", map[string]interface{}{
+					"id":         jobID,
+					"type":       "total_discovered",
+					"filesCount": count,
+				})
+			}
+		}
+
+		// Parse directory discovery summary
+		if strings.Contains(line, "Directory discovery summary:") {
+			// Summary is starting - next lines will have stats
+		}
+		if strings.Contains(line, "Fully scanned:") {
+			if match := regexp.MustCompile(`Fully scanned:\s+(\d+)\s+directories`).FindStringSubmatch(line); len(match) > 1 {
+				completedDirs, _ := strconv.Atoi(match[1])
+				runtime.EventsEmit(s.ctx, "job:discovery", map[string]interface{}{
+					"id":               jobID,
+					"type":             "discovery_complete",
+					"completedDirs":    completedDirs,
+				})
+			}
+		}
+
+		// Emit raw log line for general output
+		runtime.EventsEmit(s.ctx, "job:log", map[string]interface{}{
+			"id":      jobID,
+			"stream":  streamType,
+			"message": line,
+		})
+	}
+
+	if err := scanner.Err(); err != nil {
+		s.logError("[CopyService] streamOutput: Scanner error for %s: %v", streamType, err)
+	}
+}
+
+// parseAndEmitStats parses stats line and emits structured progress event
+func (s *CopyService) parseAndEmitStats(line string, jobID string) {
+	// Example: [150 files] Completed: 145 | Skipped: 3 | Failed: 2 | Speed: 12.34 MB/s | Delta: 25.67 MB
+	stats := make(map[string]interface{})
+	stats["id"] = jobID
+
+	// Extract total files: [150 files]
+	if match := regexp.MustCompile(`\[(\d+)\s+files\]`).FindStringSubmatch(line); len(match) > 1 {
+		stats["totalFiles"] = parseFloatOrInt(match[1])
+	}
+
+	// Extract Completed: X
+	if match := regexp.MustCompile(`Completed:\s+(\d+)`).FindStringSubmatch(line); len(match) > 1 {
+		stats["filesCompleted"] = parseFloatOrInt(match[1])
+	}
+
+	// Extract Skipped: X
+	if match := regexp.MustCompile(`Skipped:\s+(\d+)`).FindStringSubmatch(line); len(match) > 1 {
+		stats["filesSkipped"] = parseFloatOrInt(match[1])
+	}
+
+	// Extract Failed: X
+	if match := regexp.MustCompile(`Failed:\s+(\d+)`).FindStringSubmatch(line); len(match) > 1 {
+		stats["filesFailed"] = parseFloatOrInt(match[1])
+	}
+
+	// Extract Speed: X.XX MB/s or X.XX KB/s
+	if match := regexp.MustCompile(`Speed:\s+([\d.]+)\s+(MB/s|KB/s|B/s)`).FindStringSubmatch(line); len(match) > 2 {
+		speedValue := parseFloat(match[1])
+		unit := match[2]
+		stats["speed"] = speedValue
+		stats["speedUnit"] = unit
+		// Convert to MB/s for consistent progress calculation
+		if unit == "KB/s" {
+			stats["speedMBps"] = speedValue / 1024.0
+		} else if unit == "MB/s" {
+			stats["speedMBps"] = speedValue
+		} else {
+			stats["speedMBps"] = speedValue / (1024.0 * 1024.0)
+		}
+	}
+
+	// Extract Delta: X.XX MB (if present)
+	if match := regexp.MustCompile(`Delta:\s+([\d.]+)\s+MB`).FindStringSubmatch(line); len(match) > 1 {
+		stats["deltaMB"] = parseFloat(match[1])
+	}
+
+	// Calculate progress percentage (completed / total)
+	if totalFiles, ok := stats["totalFiles"].(float64); ok && totalFiles > 0 {
+		if completed, ok := stats["filesCompleted"].(float64); ok {
+			stats["progress"] = int((completed / totalFiles) * 100)
+		}
+	}
+
+	// Emit structured progress event
+	runtime.EventsEmit(s.ctx, "job:progress", stats)
+}
+
+// parseAndEmitFileProgress parses worker status line and emits file progress event
+func (s *CopyService) parseAndEmitFileProgress(line string, jobID string) {
+	// Example: Copying: filename (X MB/Y MB Z%) or Copying: filename (X MB)
+	fileData := make(map[string]interface{})
+	fileData["id"] = jobID
+
+	// Extract filename
+	if match := regexp.MustCompile(`Copying:\s+(.+?)\s+\(`).FindStringSubmatch(line); len(match) > 1 {
+		fileData["currentFile"] = strings.TrimSpace(match[1])
+	}
+
+	// Extract progress: (X MB/Y MB Z%)
+	if match := regexp.MustCompile(`\(([\d.]+)\s+MB/([\d.]+)\s+MB\s+([\d.]+)%\)`).FindStringSubmatch(line); len(match) > 3 {
+		fileData["fileBytesCopied"] = parseFloat(match[1]) * 1024 * 1024 // Convert MB to bytes
+		fileData["fileBytesTotal"] = parseFloat(match[2]) * 1024 * 1024
+		fileData["fileProgress"] = parseFloat(match[3])
+	} else if match := regexp.MustCompile(`\(([\d.]+)\s+MB\)`).FindStringSubmatch(line); len(match) > 1 {
+		// No total size available
+		fileData["fileBytesCopied"] = parseFloat(match[1]) * 1024 * 1024
+		fileData["fileProgress"] = 0
+	}
+
+	// Emit file progress event
+	runtime.EventsEmit(s.ctx, "job:file", fileData)
+}
+
+// Helper functions
+func parseFloatOrInt(s string) float64 {
+	if val, err := strconv.ParseFloat(s, 64); err == nil {
+		return val
+	}
+	return 0
+}
+
+func parseFloat(s string) float64 {
+	if val, err := strconv.ParseFloat(s, 64); err == nil {
+		return val
+	}
+	return 0
+}

@@ -33,3 +33,4 @@ GOOS=windows GOARCH=386 go build -ldflags "-X main.version=$VERSION" -o "$BUILD_
 echo "Build complete! Binaries in $BUILD_DIR:"
 ls -lh "$BUILD_DIR"
 
+

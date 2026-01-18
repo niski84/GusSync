@@ -1,0 +1,8 @@
+# Wails ignore file - exclude CLI main from Wails builds
+main.go
+*.sh
+test_*.sh
+gus_state.md
+*.log
+
+
