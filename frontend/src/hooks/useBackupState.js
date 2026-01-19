@@ -20,6 +20,7 @@ export function useBackupState() {
   const [currentFile, setCurrentFile] = useState('')
   const [status, setStatus] = useState('idle') // "idle" | "running" | "error" | "success"
   const [deviceConnected, setDeviceConnected] = useState(false)
+  const [devices, setDevices] = useState([])
   const [statusMessage, setStatusMessage] = useState('')
   const [sourcePath, setSourcePath] = useState('')
   const [destPath, setDestPath] = useState('')
@@ -57,6 +58,9 @@ export function useBackupState() {
     speedMBps: 0,
   })
 
+  // Recent logs for UI display
+  const [recentLogs, setRecentLogs] = useState([]) // Array of string
+
   useEffect(() => {
     // Runtime check - only set up listeners in Wails environment
     if (!window.runtime) {
@@ -79,6 +83,7 @@ export function useBackupState() {
       // Update paths if provided
       if (data.sourcePath) {
         setSourcePath(data.sourcePath)
+        setDeviceConnected(true) // If we have a source path, a device is definitely connected
       }
       if (data.destPath) {
         setDestPath(data.destPath)
@@ -116,7 +121,7 @@ export function useBackupState() {
 
     // Listen to job:log events (for progress updates)
     const cleanupLog = EventsOn('job:log', (data) => {
-      console.log('[useBackupState] job:log event:', data)
+      // console.log('[useBackupState] job:log event:', data)
       // If log contains file info, update currentFile
       if (data.file) {
         setCurrentFile(data.file)
@@ -124,6 +129,14 @@ export function useBackupState() {
       // If log contains progress, update progress
       if (data.progress !== undefined) {
         setProgress(data.progress)
+      }
+
+      // Keep recent logs (last 3)
+      if (data.message && !data.message.startsWith('[') && !data.message.includes('W:')) {
+        setRecentLogs(prev => {
+          const newLogs = [...prev, data.message]
+          return newLogs.slice(-3)
+        })
       }
     })
 
@@ -135,7 +148,7 @@ export function useBackupState() {
       if (data.deltaMB !== undefined) {
         setMbProgress(prev => {
           const newTotalCopied = prev.totalMBCopied + (data.deltaMB || 0)
-          console.log(`[useBackupState] Progress Update: Copied ${newTotalCopied.toFixed(2)} MB (+${data.deltaMB.toFixed(2)} MB)`)
+          // console.log(`[useBackupState] Progress Update: Copied ${newTotalCopied.toFixed(2)} MB (+${data.deltaMB.toFixed(2)} MB)`)
           return {
             ...prev,
             deltaMB: data.deltaMB || 0,
@@ -157,23 +170,26 @@ export function useBackupState() {
 
       // Update file-based progress as fallback
       if (data.progressFiles !== undefined) {
-        console.log(`[useBackupState] Progress Update (Files): ${data.progressFiles.toFixed(2)}%`)
-        setProgress(data.progressFiles)
+        const newProgress = parseFloat(data.progressFiles.toFixed(2))
+        console.log(`[useBackupState] Updating progress to ${newProgress}% from progressFiles`)
+        setProgress(newProgress)
       } else if (data.progress !== undefined) {
-        setProgress(data.progress)
+        const newProgress = parseFloat(data.progress.toFixed(2))
+        console.log(`[useBackupState] Updating progress to ${newProgress}% from progress`)
+        setProgress(newProgress)
       }
     })
 
     // Listen to job:worker events - individual worker status
     const cleanupWorker = EventsOn('job:worker', (data) => {
-      console.log('[useBackupState] job:worker event:', data)
+      // console.log('[useBackupState] job:worker event:', data)
       
       const workerID = data.workerID
       if (workerID !== undefined) {
         const worker = {
           status: data.status || 'idle',
           fileName: data.fileName || '',
-          message: data.message || '', // Added this field
+          message: data.message || '',
           progress: data.progress || 0,
           speed: data.speed || '',
           bytesCopied: data.bytesCopied || 0,
@@ -187,20 +203,28 @@ export function useBackupState() {
         }))
 
         // Track total MB discovered - accumulate from file sizes seen in worker status
-        // When we see a file being copied with bytesTotal, estimate discovered MB
-        if (worker.bytesTotal > 0 && worker.status === 'copying') {
+        if (worker.bytesTotal > 0 && (worker.status === 'copying' || worker.status === 'active' || worker.status === 'starting')) {
           setMbProgress(prev => {
             const fileMB = worker.bytesTotal / (1024 * 1024)
-            // Heuristic: total MB discovered is at least the sum of all files we've seen
-            // We track: current copied MB + remaining files' sizes we've encountered
-            // For accuracy: use bytesTotal from active workers as "discovered but not yet copied"
-            const discoveredMB = prev.totalMBCopied + fileMB
             
-            // Update totalMBDiscovered if this gives us a better estimate
-            // We want the maximum of: current estimate, copied MB + current file size
+            // We need a way to estimate the total MB without double counting.
+            // For now, if totalMBDiscovered is 0, initialize it with something
+            // to get the progress bar started. As we discover more files, it will grow.
+            // A better way is to sum up all file sizes, but we only see them one by one.
+            
+            // If we have totalFiles from summary stats, we can estimate:
+            // average file size * totalFiles
+            let estimatedTotal = prev.totalMBDiscovered
+            if (estimatedTotal === 0 && summaryStats.totalFiles > 0) {
+              estimatedTotal = summaryStats.totalFiles * fileMB // Rough initial estimate
+            }
+            
+            // At minimum, total discovered must be at least what we've copied + what we're currently copying
+            const currentMinimum = prev.totalMBCopied + fileMB
+            
             return {
               ...prev,
-              totalMBDiscovered: Math.max(prev.totalMBDiscovered || 0, discoveredMB),
+              totalMBDiscovered: Math.max(estimatedTotal, currentMinimum),
             }
           })
         }
@@ -235,12 +259,23 @@ export function useBackupState() {
       setDeviceConnected(data.connected || false)
     })
 
+    // Listen to device:list events
+    const cleanupDeviceList = EventsOn('device:list', (data) => {
+      console.log('[useBackupState] device:list event:', data)
+      setDevices(data || [])
+      setDeviceConnected(data && data.length > 0)
+    })
+
     // Listen to PrereqReport events to update device connection status
     const cleanupPrereqReport = EventsOn('PrereqReport', (report) => {
       console.log('[useBackupState] PrereqReport event:', report)
       // Check if device is connected based on prereq report
       if (report && report.checks) {
-        const deviceCheck = report.checks.find(c => c.id === 'device' || c.name?.toLowerCase().includes('device'))
+        const deviceCheck = report.checks.find(c => 
+          c.id === 'device' || 
+          c.id === 'device_connection' || 
+          c.name?.toLowerCase().includes('device')
+        )
         if (deviceCheck) {
           const isConnected = deviceCheck.status === 'ok'
           console.log('[useBackupState] Device connection status:', isConnected, 'from check:', deviceCheck)
@@ -300,22 +335,56 @@ export function useBackupState() {
       }
     })
 
-    // Also get initial device connection status on mount
-    if (window.PrereqService) {
-      window.PrereqService.GetPrereqReport().then((report) => {
-        // Check if device is connected based on prereq report
-        if (report && report.checks) {
-          const deviceCheck = report.checks.find(c => c.id === 'device' || c.name?.toLowerCase().includes('device'))
-          if (deviceCheck) {
-            const isConnected = deviceCheck.status === 'ok'
-            console.log('[useBackupState] Initial device connection status:', isConnected)
-            setDeviceConnected(isConnected)
+    // Also get initial device connection status and list on mount
+    const fetchInitialStatus = async () => {
+      // 1. Check devices list
+      if (window.go?.services?.DeviceService?.GetDeviceStatus) {
+        try {
+          const initialDevices = await window.go.services.DeviceService.GetDeviceStatus()
+          console.log('[useBackupState] Initial devices fetched:', initialDevices)
+          if (initialDevices && initialDevices.length > 0) {
+            setDevices(initialDevices)
+            setDeviceConnected(true)
           }
+        } catch (err) {
+          console.warn('[useBackupState] Failed to get initial device status:', err)
         }
-      }).catch(err => {
-        console.warn('[useBackupState] Failed to get prereq report:', err)
-      })
+      }
+
+      // 2. Check prereq report
+      if (window.go?.services?.PrereqService?.GetPrereqReport) {
+        try {
+          const report = await window.go.services.PrereqService.GetPrereqReport()
+          console.log('[useBackupState] Initial prereq report fetched for device status:', report)
+          if (report && report.checks) {
+            const deviceCheck = report.checks.find(c => 
+              c.id === 'device' || 
+              c.id === 'device_connection' || 
+              c.name?.toLowerCase().includes('device')
+            )
+            if (deviceCheck) {
+              const isConnected = deviceCheck.status === 'ok'
+              console.log('[useBackupState] Device connection status from initial report:', isConnected)
+              setDeviceConnected(prev => prev || isConnected)
+            }
+          }
+        } catch (err) {
+          console.warn('[useBackupState] Failed to get initial prereq report:', err)
+        }
+      }
     }
+
+    // Wait for bindings to be available
+    const waitForBindings = async () => {
+      let retries = 0
+      while (retries < 10 && (!window.go?.services?.DeviceService || !window.go?.services?.PrereqService)) {
+        await new Promise(r => setTimeout(r, 200))
+        retries++
+      }
+      fetchInitialStatus()
+    }
+
+    waitForBindings()
 
     // Cleanup function - remove all listeners on unmount
     return () => {
@@ -328,6 +397,7 @@ export function useBackupState() {
       cleanupBackupProgress()
       cleanupBackupStatus()
       cleanupDevice()
+      cleanupDeviceList()
       cleanupPrereqReport()
       cleanupDiscovery()
     }
@@ -365,6 +435,7 @@ export function useBackupState() {
     currentFile,
     status,
     deviceConnected,
+    devices,
     statusMessage,
     sourcePath,
     destPath,
@@ -373,6 +444,7 @@ export function useBackupState() {
     activeWorkers, // Only active (copying) workers
     mbProgress, // MB tracking: { totalMBDiscovered, totalMBCopied, deltaMB }
     summaryStats, // CLI summary: { totalFiles, filesCompleted, filesSkipped, filesFailed, speed, speedUnit, speedMBps }
+    recentLogs, // Last few log messages
     // Helper functions
     isIdle: status === 'idle',
     isSuccess: status === 'success',

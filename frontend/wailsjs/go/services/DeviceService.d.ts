@@ -6,3 +6,5 @@ import {context} from '../models';
 export function GetDeviceStatus():Promise<Array<services.DeviceInfo>>;
 
 export function SetContext(arg1:context.Context):Promise<void>;
+
+export function StartPolling(arg1:context.Context):Promise<void>;

@@ -9,3 +9,7 @@ export function GetDeviceStatus() {
 export function SetContext(arg1) {
   return window['go']['services']['DeviceService']['SetContext'](arg1);
 }
+
+export function StartPolling(arg1) {
+  return window['go']['services']['DeviceService']['StartPolling'](arg1);
+}

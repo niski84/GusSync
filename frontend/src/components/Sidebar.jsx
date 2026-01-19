@@ -1,6 +1,7 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { ClipboardCheck, FileText, Home } from 'lucide-react'
+import logo from '../assets/logo.png'
 
 export default function Sidebar() {
   const location = useLocation()
@@ -15,9 +16,12 @@ export default function Sidebar() {
   return (
     <div className="w-[250px] h-screen bg-slate-900 flex flex-col fixed left-0 top-0 border-r border-slate-800">
       {/* Header */}
-      <div className="p-6 border-b border-slate-800">
-        <h1 className="text-xl font-bold text-white">GusSync</h1>
-        <p className="text-sm text-slate-400 mt-1">v1.0.0</p>
+      <div className="p-6 border-b border-slate-800 flex items-center justify-between gap-4">
+        <div className="flex flex-col">
+          <h1 className="text-2xl font-bold text-white leading-tight">GusSync</h1>
+          <p className="text-sm text-slate-400">v1.0.0</p>
+        </div>
+        <img src={logo} alt="Logo" className="h-20 w-20 object-contain rounded-lg shadow-lg shadow-black/20" />
       </div>
 
       {/* Navigation */}

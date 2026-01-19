@@ -21,21 +21,23 @@ import (
 
 // CopyService handles copy operations
 type CopyService struct {
-	ctx        context.Context
-	logger     *log.Logger
-	jobManager *JobManager
-	config     *ConfigService
-	errorLog   *log.Logger
-	errorFile  *os.File
-	errorMutex sync.Mutex
+	ctx           context.Context
+	logger        *log.Logger
+	jobManager    *JobManager
+	deviceService *DeviceService
+	config        *ConfigService
+	errorLog      *log.Logger
+	errorFile     *os.File
+	errorMutex    sync.Mutex
 }
 
 // NewCopyService creates a new CopyService
-func NewCopyService(ctx context.Context, logger *log.Logger, jobManager *JobManager) *CopyService {
+func NewCopyService(ctx context.Context, logger *log.Logger, jobManager *JobManager, deviceService *DeviceService) *CopyService {
 	return &CopyService{
-		ctx:        ctx,
-		logger:     logger,
-		jobManager: jobManager,
+		ctx:           ctx,
+		logger:        logger,
+		jobManager:    jobManager,
+		deviceService: deviceService,
 	}
 }
 
@@ -118,8 +120,35 @@ func (s *CopyService) StartBackup(sourcePath, destPath, mode string) error {
 
 	// Validate source path
 	if sourcePath == "" {
-		// Try to auto-detect from device service or use default MTP mount
-		if goruntime.GOOS == "linux" {
+		// Try to auto-detect from device service
+		devices, err := s.deviceService.GetDeviceStatus()
+		if err == nil && len(devices) > 0 {
+			// Find a device that matches the requested mode
+			var selectedDevice *DeviceInfo
+			for _, d := range devices {
+				if mode == "adb" && d.Type == "adb" {
+					selectedDevice = &d
+					break
+				} else if mode == "mount" && (d.Type == "mtp" || d.Type == "gphoto2") {
+					selectedDevice = &d
+					break
+				}
+			}
+			
+			// If no exact match for mode, just take the first one
+			if selectedDevice == nil {
+				selectedDevice = &devices[0]
+			}
+			
+			sourcePath = selectedDevice.Path
+			s.logger.Printf("[CopyService] StartBackup: Auto-detected source path=%s (Type: %s, ID: %s)", sourcePath, selectedDevice.Type, selectedDevice.ID)
+			
+			// If we're in mount mode but the auto-detected device is ADB, maybe we should warn?
+			// For now, just use it.
+		}
+
+		// Fallback for Linux if DeviceService failed or returned nothing
+		if sourcePath == "" && goruntime.GOOS == "linux" {
 			uid := os.Getuid()
 			gvfsBase := filepath.Join("/run/user", fmt.Sprintf("%d", uid), "gvfs")
 			entries, err := os.ReadDir(gvfsBase)
@@ -127,14 +156,19 @@ func (s *CopyService) StartBackup(sourcePath, destPath, mode string) error {
 				for _, entry := range entries {
 					if entry.IsDir() && (strings.HasPrefix(entry.Name(), "mtp") || strings.HasPrefix(entry.Name(), "gphoto2")) {
 						sourcePath = filepath.Join(gvfsBase, entry.Name())
-						s.logger.Printf("[CopyService] StartBackup: Auto-detected source path=%s", sourcePath)
+						s.logger.Printf("[CopyService] StartBackup: Fallback auto-detected source path=%s", sourcePath)
 						break
 					}
 				}
 			}
 		}
+		
 		if sourcePath == "" {
-			sourcePath = "/mnt/phone" // Default fallback
+			if mode == "adb" {
+				sourcePath = "/sdcard" // Standard Android root
+			} else {
+				sourcePath = "/mnt/phone" // Default fallback
+			}
 		}
 	}
 
@@ -218,17 +252,20 @@ func (s *CopyService) runBackup(ctx context.Context, jobID string, sourcePath, d
 		return
 	}
 
-	s.logger.Printf("[CopyService] runBackup: Executing CLI: %s -source %s -dest %s -mode %s", execPath, sourcePath, destPath, mode)
-	s.logError("[CopyService] runBackup: Starting backup job %s - source=%s dest=%s mode=%s execPath=%s", jobID, sourcePath, destPath, mode, execPath)
+	// Pass number of workers
+	workers := 2
+	
+	s.logger.Printf("[CopyService] runBackup: Executing CLI: %s -source %s -dest %s -mode %s -workers %d", execPath, sourcePath, destPath, mode, workers)
+	s.logError("[CopyService] runBackup: Starting backup job %s - source=%s dest=%s mode=%s execPath=%s workers=%d", jobID, sourcePath, destPath, mode, execPath, workers)
 	
 	// Emit log line with backup details
 	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
 		"timestamp": time.Now().Format(time.RFC3339Nano),
 		"level":     "info",
-		"message":   fmt.Sprintf("Backup running: source=%s dest=%s mode=%s", sourcePath, destPath, mode),
+		"message":   fmt.Sprintf("Backup running: source=%s dest=%s mode=%s workers=%d", sourcePath, destPath, mode, workers),
 	})
 
-	cmd := exec.CommandContext(ctx, execPath, "-source", sourcePath, "-dest", destPath, "-mode", mode)
+	cmd := exec.CommandContext(ctx, execPath, "-source", sourcePath, "-dest", destPath, "-mode", mode, "-workers", strconv.Itoa(workers))
 	
 	// Set up process group for proper signal handling on Unix
 	if goruntime.GOOS != "windows" {
@@ -536,58 +573,70 @@ func (s *CopyService) parseAndEmitWorkerStatus(workerID int, status string, jobI
 	workerData["id"] = jobID
 	workerData["workerID"] = workerID
 
+	// Log the raw status for debugging
+	s.logger.Printf("[CopyService] parseAndEmitWorkerStatus: W%d status=%s", workerID, status)
+
 	// Parse status types
-	if status == "idle" {
+	if status == "idle" || status == "" {
 		workerData["status"] = "idle"
 		workerData["fileName"] = ""
 		workerData["progress"] = 0
 		workerData["speed"] = ""
+		workerData["message"] = "Waiting for tasks..."
 	} else if strings.HasPrefix(status, "Copying:") {
 		workerData["status"] = "copying"
-		// Extract: Copying: filename (X MB/Y MB Z% speed) or Copying: filename (X MB speed)
-		if match := regexp.MustCompile(`Copying:\s+(.+?)\s+\(([\d.]+)\s+MB/([\d.]+)\s+MB\s+([\d.]+)%\s*(.+?)?\)`).FindStringSubmatch(status); len(match) > 4 {
+		
+		// 1. Try to extract: Copying: filename (X unit/Y unit Z% speed)
+		// Updated regex to handle any unit (B, KB, MB, GB, etc.) and varied spacing
+		fullRegex := regexp.MustCompile(`Copying:\s+(.+)\s+\(([\d.]+)\s*([KMGTPE]?B)?\s*/\s*([\d.]+)\s*([KMGTPE]?B)?\s+([\d.]+)%\s*(.+?)?\)`)
+		if match := fullRegex.FindStringSubmatch(status); len(match) > 6 {
 			fileName := strings.TrimSpace(match[1])
-			bytesCopiedMB := parseFloat(match[2])
-			bytesTotalMB := parseFloat(match[3])
-			percent := parseFloat(match[4])
+			bytesCopied := parseSizeToBytes(match[2], match[3])
+			bytesTotal := parseSizeToBytes(match[4], match[5])
+			percent := parseFloat(match[6])
 			speed := ""
-			if len(match) > 5 {
-				speed = strings.TrimSpace(match[5])
+			if len(match) > 7 {
+				speed = strings.TrimSpace(match[7])
 			}
 			
 			workerData["fileName"] = fileName
-			workerData["bytesCopied"] = bytesCopiedMB * 1024 * 1024
-			workerData["bytesTotal"] = bytesTotalMB * 1024 * 1024
+			workerData["bytesCopied"] = bytesCopied
+			workerData["bytesTotal"] = bytesTotal
 			workerData["progress"] = percent
 			workerData["speed"] = speed
-		} else if match := regexp.MustCompile(`Copying:\s+(.+?)\s+\(([\d.]+)\s+MB\s*(.+?)?\)`).FindStringSubmatch(status); len(match) > 2 {
-			fileName := strings.TrimSpace(match[1])
-			bytesCopiedMB := parseFloat(match[2])
-			speed := ""
-			if len(match) > 3 {
-				speed = strings.TrimSpace(match[3])
+			workerData["fileSize"] = formatSizeBytes(bytesTotal)
+		} else {
+			// 2. Try simpler version: Copying: filename (X unit speed)
+			simpleRegex := regexp.MustCompile(`Copying:\s+(.+)\s+\(([\d.]+)\s*([KMGTPE]?B)?\s*(.+?)?\)`)
+			if match := simpleRegex.FindStringSubmatch(status); len(match) > 3 {
+				fileName := strings.TrimSpace(match[1])
+				bytesCopied := parseSizeToBytes(match[2], match[3])
+				speed := strings.TrimSpace(match[4])
+				
+				workerData["fileName"] = fileName
+				workerData["bytesCopied"] = bytesCopied
+				workerData["bytesTotal"] = 0
+				workerData["progress"] = 0
+				workerData["speed"] = speed
+			} else {
+				// Fallback: just filename
+				workerData["fileName"] = strings.TrimSpace(strings.TrimPrefix(status, "Copying:"))
+				workerData["message"] = "Active"
 			}
-			
-			workerData["fileName"] = fileName
-			workerData["bytesCopied"] = bytesCopiedMB * 1024 * 1024
-			workerData["bytesTotal"] = 0 // Unknown
-			workerData["progress"] = 0
-			workerData["speed"] = speed
 		}
 	} else if strings.HasPrefix(status, "Starting:") {
 		workerData["status"] = "starting"
-		if match := regexp.MustCompile(`Starting:\s+(.+?)\s+\((.+?)\)`).FindStringSubmatch(status); len(match) > 2 {
-			fileName := strings.TrimSpace(match[1])
-			fileSize := strings.TrimSpace(match[2])
-			workerData["fileName"] = fileName
-			workerData["fileSize"] = fileSize
+		// Regex for: Starting: filename (size unit)
+		startingRegex := regexp.MustCompile(`Starting:\s+(.+?)\s+\((.+?)\)`)
+		if match := startingRegex.FindStringSubmatch(status); len(match) > 2 {
+			workerData["fileName"] = strings.TrimSpace(match[1])
+			workerData["fileSize"] = strings.TrimSpace(match[2])
+		} else {
+			workerData["fileName"] = strings.TrimSpace(strings.TrimPrefix(status, "Starting:"))
 		}
 	} else if strings.HasPrefix(status, "Failed:") {
 		workerData["status"] = "failed"
-		if match := regexp.MustCompile(`Failed:\s+(.+)$`).FindStringSubmatch(status); len(match) > 1 {
-			fileName := strings.TrimSpace(match[1])
-			workerData["fileName"] = fileName
-		}
+		workerData["fileName"] = strings.TrimSpace(strings.TrimPrefix(status, "Failed:"))
 	} else {
 		// Fallback for any other status (e.g. "Hashing...", "Verifying...")
 		workerData["status"] = "active"
@@ -596,6 +645,45 @@ func (s *CopyService) parseAndEmitWorkerStatus(workerID int, status string, jobI
 
 	// Emit worker status event
 	runtime.EventsEmit(s.ctx, "job:worker", workerData)
+}
+
+// parseSizeToBytes converts value + unit (e.g. "1.5", "MB") to bytes
+func parseSizeToBytes(valStr, unit string) float64 {
+	val := parseFloat(valStr)
+	unit = strings.ToUpper(strings.TrimSpace(unit))
+	
+	switch unit {
+	case "B":
+		return val
+	case "KB":
+		return val * 1024
+	case "MB":
+		return val * 1024 * 1024
+	case "GB":
+		return val * 1024 * 1024 * 1024
+	case "TB":
+		return val * 1024 * 1024 * 1024 * 1024
+	default:
+		// Default to MB if unit is missing but common in our CLI
+		return val * 1024 * 1024
+	}
+}
+
+// formatSizeBytes formats float64 bytes as human-readable size
+func formatSizeBytes(bytes float64) string {
+	if bytes <= 0 {
+		return ""
+	}
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%.0f B", bytes)
+	}
+	div, exp := float64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", bytes/div, "KMGTPE"[exp])
 }
 
 // Helper functions

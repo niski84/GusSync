@@ -10,6 +10,7 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"GusSync/app/services"
 )
@@ -42,6 +43,7 @@ func NewApp() *App {
 
 // OnStartup is called when the app starts (called by Wails after frontend loads)
 func (a *App) OnStartup(ctx context.Context) {
+	runtime.WindowCenter(ctx)
 	startTime := time.Now()
 	a.ctx = ctx
 	logger := log.New(os.Stderr, "[GusSync] ", log.LstdFlags|log.Lshortfile)
@@ -104,6 +106,9 @@ func (a *App) OnStartup(ctx context.Context) {
 
 	totalServiceDuration := time.Since(startTime)
 	logger.Printf("[TIMING %s] [App] OnStartup: All services updated (took %v total)", time.Now().Format("2006-01-02 15:04:05.000"), totalServiceDuration)
+
+	// Start device polling for immediate UI updates when phone is plugged in
+	a.deviceService.StartPolling(ctx)
 
 	// Run prerequisite checks immediately and cache results
 	logger.Printf("[TIMING %s] [App] OnStartup: Running prerequisite checks...", time.Now().Format("2006-01-02 15:04:05.000"))
@@ -173,7 +178,7 @@ func Run() error {
 	jobManager := services.NewJobManager(ctx, logger)
 	prereqService := services.NewPrereqService(ctx, logger)
 	deviceService := services.NewDeviceService(ctx, logger)
-	copyService := services.NewCopyService(ctx, logger, jobManager)
+	copyService := services.NewCopyService(ctx, logger, jobManager, deviceService)
 	verifyService := services.NewVerifyService(ctx, logger, jobManager)
 	cleanupService := services.NewCleanupService(ctx, logger, jobManager)
 	logService := services.NewLogService(ctx, logger)

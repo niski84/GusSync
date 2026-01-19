@@ -44,6 +44,25 @@ func NewPrereqService(ctx context.Context, logger *log.Logger) *PrereqService {
 // SetContext updates the context for the PrereqService
 func (s *PrereqService) SetContext(ctx context.Context) {
 	s.ctx = ctx
+	
+	// Start listening for device changes to trigger immediate refreshes
+	go func() {
+		// Wait a bit for everything to settle
+		time.Sleep(1 * time.Second)
+		
+		s.logDebug("[PrereqService] Starting listener for device:changed events")
+		ch := make(chan struct{})
+		cleanup := runtime.EventsOn(ctx, "device:changed", func(data ...interface{}) {
+			s.logDebug("[PrereqService] Received device:changed event - triggering refresh")
+			// Trigger a refresh (async)
+			go s.RefreshNow()
+		})
+		
+		// Wait for context to be done
+		<-ctx.Done()
+		cleanup()
+		close(ch)
+	}()
 }
 
 // PrereqCheck represents a single prerequisite check
@@ -495,12 +514,16 @@ func (s *PrereqService) checkDeviceConnection() PrereqCheck {
 		output, err := cmd.CombinedOutput()
 		if err == nil {
 			outputStr := string(output)
-			// Look for "device" (authorized) in output
 			lines := strings.Split(outputStr, "\n")
 			for _, line := range lines {
-				if strings.Contains(line, "\tdevice") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, "List of devices") {
+					continue
+				}
+				// Look for authorized device - more robust check
+				if strings.Contains(line, "device") && !strings.Contains(line, "unauthorized") && !strings.Contains(line, "offline") {
 					parts := strings.Fields(line)
-					if len(parts) >= 2 {
+					if len(parts) >= 2 && parts[1] == "device" {
 						check.Status = "ok"
 						check.Details = "ADB device connected: " + parts[0]
 						return check

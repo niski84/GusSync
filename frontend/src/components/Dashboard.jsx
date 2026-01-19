@@ -16,6 +16,18 @@ export default function Dashboard() {
   const [error, setError] = useState(null)
   const [isVerifying, setIsVerifying] = useState(false)
   const [isCleaning, setIsCleaning] = useState(false)
+
+  // Reset starting/loading states when backup state changes
+  React.useEffect(() => {
+    if (backupState.isRunning) {
+      setIsStarting(false)
+    }
+    if (!backupState.isRunning && backupState.status !== 'idle') {
+      setIsStarting(false)
+      setIsVerifying(false)
+      setIsCleaning(false)
+    }
+  }, [backupState.isRunning, backupState.status])
   
   // Default list of checks (in order)
   const defaultChecks = [
@@ -141,16 +153,43 @@ export default function Dashboard() {
 
   // Get device info from status or prereq report
   const getDeviceInfo = () => {
+    if (backupState.devices && backupState.devices.length > 0) {
+      const device = backupState.devices[0]
+      if (device.type === 'adb') {
+        return { name: `${device.id}`, type: 'ADB' }
+      }
+      // For MTP, try to extract name from ID which is like mtp:host=Xiaomi...
+      const match = device.id.match(/host=([^/]+)/)
+      if (match) return { name: match[1], type: 'MTP' }
+      return { name: device.name || device.id, type: device.type?.toUpperCase() || 'MTP' }
+    }
+    
     if (backupState.sourcePath) {
       // Extract device name from path like /run/user/1000/gvfs/mtp:host=Xiaomi_Mi_11_Ultra
       const match = backupState.sourcePath.match(/mtp:host=([^/]+)|gphoto2:host=([^/]+)/)
       if (match) {
-        return match[1] || match[2] || 'Unknown Device'
+        return { name: match[1] || match[2] || 'Unknown Device', type: 'MTP' }
       }
-      return 'Device Connected'
+      return { name: 'Device Connected', type: 'MTP' }
     }
-    return 'No Device'
+
+    // Fallback to PrereqReport details if available
+    const deviceCheck = prereqReport?.checks?.find(c => c.id === 'device_connection' && c.status === 'ok')
+    if (deviceCheck && deviceCheck.details) {
+      if (deviceCheck.details.includes('ADB device connected')) {
+        const parts = deviceCheck.details.split(': ')
+        return { name: parts[1] || 'ADB Device', type: 'ADB' }
+      }
+      if (deviceCheck.details.includes('MTP/gphoto2 device mounted')) {
+        const parts = deviceCheck.details.split(': ')
+        return { name: parts[1] || 'MTP Device', type: 'MTP' }
+      }
+    }
+
+    return { name: 'No Device', type: '' }
   }
+
+  const deviceInfo = getDeviceInfo()
 
   // Truncate middle of path
   const truncatePath = (path, maxLength = 40) => {
@@ -291,7 +330,7 @@ export default function Dashboard() {
           <div className={`w-3 h-3 rounded-full ${backupState.deviceConnected ? 'bg-emerald-500' : 'bg-slate-600'}`} />
           <p className={`text-sm ${backupState.deviceConnected ? 'text-emerald-500' : 'text-slate-400'}`}>
             {backupState.deviceConnected
-              ? `Connected: ${getDeviceInfo()} (MTP Mode)`
+              ? `Connected: ${deviceInfo.name} (${deviceInfo.type} Mode)`
               : 'No device connected'}
           </p>
         </div>
@@ -320,6 +359,20 @@ export default function Dashboard() {
 
         {backupState.isRunning && (
           <>
+            {/* Live Console-style Status Line */}
+            <div className="bg-black/40 rounded border border-slate-700 p-2 mb-4 font-mono text-[11px] text-emerald-400/90 shadow-inner">
+              <div className="flex items-center gap-2 overflow-hidden whitespace-nowrap">
+                <span className="text-blue-400 font-bold">● LIVE</span>
+                <span>
+                  [{backupState.summaryStats?.totalFiles || 0} files] 
+                  Completed: {backupState.summaryStats?.filesCompleted || 0} | 
+                  Skipped: {backupState.summaryStats?.filesSkipped || 0} | 
+                  Failed: {backupState.summaryStats?.filesFailed || 0} | 
+                  Speed: {backupState.summaryStats?.speed > 0 ? `${backupState.summaryStats.speed.toFixed(2)} ${backupState.summaryStats.speedUnit}` : '0.00 MB/s'}
+                </span>
+              </div>
+            </div>
+
             {/* Progress Bar - MB-based, more accurate */}
             <div className="w-full bg-slate-700 rounded-full h-6 mb-4 overflow-hidden shadow-inner">
               <div
@@ -336,78 +389,19 @@ export default function Dashboard() {
             {/* Summary Stats from CLI */}
             {backupState.summaryStats && (backupState.summaryStats.totalFiles > 0 || backupState.summaryStats.filesCompleted > 0 || backupState.summaryStats.filesSkipped > 0) && (
               <div className="bg-slate-900/50 rounded-lg p-3 mb-4 border border-slate-700/50">
-                {/* File counts row */}
-                <div className="grid grid-cols-4 gap-2 text-center mb-3">
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Total</p>
-                    <p className="text-lg font-bold text-slate-300">{backupState.summaryStats.totalFiles || '—'}</p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Done</p>
-                    <p className="text-lg font-bold text-emerald-400">{backupState.summaryStats.filesCompleted || 0}</p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Skipped</p>
-                    <p className={`text-lg font-bold ${backupState.summaryStats.filesSkipped > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
-                      {backupState.summaryStats.filesSkipped || 0}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Failed</p>
-                    <p className={`text-lg font-bold ${backupState.summaryStats.filesFailed > 0 ? 'text-red-400' : 'text-slate-500'}`}>
-                      {backupState.summaryStats.filesFailed || 0}
-                    </p>
-                  </div>
-                </div>
-                
-                {/* Speed and MB row */}
-                <div className="grid grid-cols-3 gap-2 text-center pt-2 border-t border-slate-700/50">
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Speed</p>
-                    <p className="text-sm font-semibold text-blue-400">
-                      {backupState.summaryStats.speed > 0 
-                        ? `${backupState.summaryStats.speed.toFixed(1)} ${backupState.summaryStats.speedUnit}`
-                        : '—'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Copied</p>
-                    <p className="text-sm font-semibold text-emerald-400">
-                      {backupState.mbProgress.totalMBCopied > 0 
-                        ? `${backupState.mbProgress.totalMBCopied.toFixed(1)} MB`
-                        : '—'}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-[10px] text-slate-500 uppercase tracking-wider">Delta</p>
-                    <p className="text-sm font-semibold text-slate-300">
-                      {backupState.mbProgress.deltaMB > 0 
-                        ? `+${backupState.mbProgress.deltaMB.toFixed(1)} MB`
-                        : '—'}
-                    </p>
-                  </div>
-                </div>
+                {/* ... grid rows ... */}
+                {/* ... existing code ... */}
               </div>
             )}
-            
-            {/* Fallback: MB Progress Stats (when summary stats not available) */}
-            {(!backupState.summaryStats || (backupState.summaryStats.totalFiles === 0 && backupState.summaryStats.filesCompleted === 0 && backupState.summaryStats.filesSkipped === 0)) && 
-             backupState.mbProgress && backupState.mbProgress.totalMBCopied > 0 && (
-              <div className="grid grid-cols-3 gap-2 mb-4 text-sm">
-                <div className="text-center">
-                  <p className="text-slate-400 text-xs">Copied</p>
-                  <p className="text-emerald-400 font-semibold">{backupState.mbProgress.totalMBCopied.toFixed(1)} MB</p>
-                </div>
-                {backupState.mbProgress.totalMBDiscovered > 0 && (
-                  <div className="text-center">
-                    <p className="text-slate-400 text-xs">Total</p>
-                    <p className="text-slate-300 font-semibold">{backupState.mbProgress.totalMBDiscovered.toFixed(1)} MB</p>
+
+            {/* Recent Activity Console */}
+            {backupState.recentLogs?.length > 0 && (
+              <div className="bg-slate-950/80 rounded border border-slate-800 p-3 mb-4 font-mono text-[10px] space-y-1">
+                {backupState.recentLogs.map((log, i) => (
+                  <div key={i} className={`${i === backupState.recentLogs.length - 1 ? 'text-blue-300' : 'text-slate-500'} truncate`}>
+                    <span className="opacity-50 mr-2">{'>'}</span> {log}
                   </div>
-                )}
-                <div className="text-center">
-                  <p className="text-slate-400 text-xs">Speed</p>
-                  <p className="text-blue-400 font-semibold">{backupState.mbProgress.deltaMB > 0 ? `${backupState.mbProgress.deltaMB.toFixed(1)} MB/2s` : '0 MB/2s'}</p>
-                </div>
+                ))}
               </div>
             )}
 
@@ -630,11 +624,21 @@ export default function Dashboard() {
 
         {/* Destination display if set */}
         {(destinationPath || backupState.destPath) && (
-          <div className="mt-4 px-4 py-2 bg-slate-700/50 rounded-lg">
-            <p className="text-xs text-slate-400 mb-1">Destination:</p>
-            <p className="text-sm text-slate-300 truncate font-mono" title={destinationPath || backupState.destPath}>
-              {truncatePath(destinationPath || backupState.destPath, 60)}
-            </p>
+          <div className="mt-4 px-4 py-3 bg-slate-700/50 rounded-lg flex items-center justify-between gap-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs text-slate-400 mb-1 uppercase tracking-wider font-semibold">Destination</p>
+              <p className="text-sm text-slate-300 truncate font-mono" title={destinationPath || backupState.destPath}>
+                {truncatePath(destinationPath || backupState.destPath, 60)}
+              </p>
+            </div>
+            {!backupState.isRunning && (
+              <button
+                onClick={handleChooseDestination}
+                className="px-3 py-1 text-xs bg-slate-600 hover:bg-slate-500 text-white rounded transition-colors whitespace-nowrap border border-slate-500/50"
+              >
+                Change
+              </button>
+            )}
           </div>
         )}
 
@@ -645,67 +649,92 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Hunter Threads - Full Width */}
-      <div className="md:col-span-2 bg-slate-800 rounded-lg p-6 flex flex-col">
-        <h3 className="text-xl font-semibold text-white mb-4">Hunter Threads</h3>
-        
-        {backupState.isRunning ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-            {Object.entries(backupState.workers).map(([workerID, worker]) => (
-              <div key={workerID} className={`rounded-lg p-3 border ${
-                worker.status === 'idle' ? 'bg-slate-900/30 border-slate-800 opacity-50' : 'bg-slate-900/80 border-blue-500/30'
-              }`}>
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${worker.status === 'idle' ? 'bg-slate-600' : 'bg-blue-500 animate-pulse'}`} />
-                    <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Hunter {workerID}</span>
-                  </div>
-                  <span className={`text-[10px] px-2 py-0.5 rounded ${
-                    worker.status === 'copying' ? 'bg-blue-500/20 text-blue-400' : 
-                    worker.status === 'starting' ? 'bg-amber-500/20 text-amber-400' :
-                    worker.status === 'idle' ? 'bg-slate-800 text-slate-500' : 'bg-slate-800 text-slate-300'
-                  }`}>
-                    {worker.status.toUpperCase()}
-                  </span>
-                </div>
-
-                {worker.status !== 'idle' && (
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-end gap-2">
-                      <p className="text-xs text-slate-300 font-mono truncate flex-1" title={worker.fileName}>
-                        {worker.fileName ? truncatePath(worker.fileName, 25) : worker.message}
-                      </p>
-                      {worker.speed && (
-                        <span className="text-[10px] text-blue-400 font-bold whitespace-nowrap">{worker.speed}</span>
-                      )}
-                    </div>
-
-                    {worker.status === 'copying' && worker.progress > 0 && (
-                      <div className="space-y-1">
-                        <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                          <div
-                            className="bg-blue-500 h-full transition-all duration-300"
-                            style={{ width: `${worker.progress}%` }}
-                          />
-                        </div>
-                        <div className="flex justify-between text-[9px] text-slate-500 font-mono">
-                          <span>{worker.progress.toFixed(1)}%</span>
-                          <span>{worker.fileSize}</span>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="flex items-center justify-center opacity-30 text-slate-500 py-8">
-            <Loader2 size={32} className="mr-3" />
-            <p className="text-sm">Threads waiting for deployment...</p>
+    {/* Hunter Threads - Full Width */}
+    <div className="md:col-span-2 bg-slate-800 rounded-lg p-6 flex flex-col">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-xl font-semibold text-white">Hunter Threads</h3>
+        {backupState.isRunning && (
+          <div className="flex items-center gap-2">
+            <span className="flex h-2 w-2 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500"></span>
+            </span>
+            <span className="text-xs text-blue-400 font-medium">Monitoring {Object.keys(backupState.workers).length} threads</span>
           </div>
         )}
       </div>
+      
+      {backupState.isRunning ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+          {Object.entries(backupState.workers).map(([workerID, worker]) => {
+            const isActive = worker.status !== 'idle' && worker.status !== ''
+            
+            return (
+              <div key={workerID} className={`rounded-lg p-3 border transition-all duration-300 ${
+                !isActive 
+                  ? 'bg-slate-900/30 border-slate-800 opacity-40 scale-[0.98]' 
+                  : 'bg-slate-900/80 border-blue-500/40 shadow-lg shadow-blue-500/10 scale-100'
+              }`}>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${!isActive ? 'bg-slate-600' : 'bg-blue-500 animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.5)]'}`} />
+                    <span className={`text-xs font-bold uppercase tracking-wider ${!isActive ? 'text-slate-500' : 'text-slate-300'}`}>Hunter {workerID}</span>
+                  </div>
+                  <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                    worker.status === 'copying' ? 'bg-blue-500/30 text-blue-300 border border-blue-500/30' : 
+                    worker.status === 'starting' ? 'bg-amber-500/30 text-amber-300 border border-amber-500/30' :
+                    worker.status === 'active' ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-500/30' :
+                    worker.status === 'failed' ? 'bg-red-500/30 text-red-300 border border-red-500/30' :
+                    'bg-slate-800 text-slate-500'
+                  }`}>
+                    {(worker.status || 'IDLE').toUpperCase()}
+                  </span>
+                </div>
+
+                {isActive && (
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-end gap-2">
+                      <p className="text-xs text-slate-300 font-mono truncate flex-1" title={worker.fileName || worker.message}>
+                        {worker.fileName ? truncatePath(worker.fileName, 25) : (worker.message ? truncatePath(worker.message, 25) : 'Processing...')}
+                      </p>
+                      {worker.speed && (
+                        <span className="text-[10px] text-blue-400 font-bold whitespace-nowrap drop-shadow-sm">{worker.speed}</span>
+                      )}
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden border border-white/5">
+                        <div
+                          className={`h-full transition-all duration-300 ${
+                            worker.status === 'starting' ? 'bg-amber-500' : 'bg-blue-500'
+                          }`}
+                          style={{ width: `${worker.progress || (worker.status === 'starting' ? 5 : 0)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[9px] text-slate-500 font-mono">
+                        <span>{worker.progress > 0 ? `${worker.progress.toFixed(1)}%` : (worker.status === 'starting' ? 'Initializing...' : 'Working...')}</span>
+                        <span>{worker.fileSize || ''}</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
+                {!isActive && (
+                  <div className="h-10 flex items-center justify-center">
+                    <span className="text-[10px] text-slate-600 font-mono">STANDBY</span>
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="flex items-center justify-center opacity-30 text-slate-500 py-8">
+          <Loader2 size={32} className="mr-3" />
+          <p className="text-sm">Threads waiting for deployment...</p>
+        </div>
+      )}
+    </div>
       </div>
     </div>
   )
