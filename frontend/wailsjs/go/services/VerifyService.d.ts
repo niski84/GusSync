@@ -7,4 +7,4 @@ export function CancelVerify():Promise<void>;
 
 export function SetContext(arg1:context.Context):Promise<void>;
 
-export function StartVerify(arg1:services.VerifyRequest):Promise<void>;
+export function StartVerify(arg1:services.VerifyRequest):Promise<string>;

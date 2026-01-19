@@ -6,12 +6,20 @@ export function CancelJob() {
   return window['go']['services']['JobManager']['CancelJob']();
 }
 
-export function CompleteJob(arg1) {
-  return window['go']['services']['JobManager']['CompleteJob'](arg1);
+export function CancelTask(arg1) {
+  return window['go']['services']['JobManager']['CancelTask'](arg1);
 }
 
 export function GetJobStatus() {
   return window['go']['services']['JobManager']['GetJobStatus']();
+}
+
+export function GetTask(arg1) {
+  return window['go']['services']['JobManager']['GetTask'](arg1);
+}
+
+export function ListTasks() {
+  return window['go']['services']['JobManager']['ListTasks']();
 }
 
 export function SetContext(arg1) {
@@ -20,8 +28,4 @@ export function SetContext(arg1) {
 
 export function SetProcessPID(arg1, arg2) {
   return window['go']['services']['JobManager']['SetProcessPID'](arg1, arg2);
-}
-
-export function StartJob(arg1) {
-  return window['go']['services']['JobManager']['StartJob'](arg1);
 }

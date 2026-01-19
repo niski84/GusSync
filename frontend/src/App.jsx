@@ -8,7 +8,10 @@ import { AppStoreProvider, useAppStore } from './store.jsx'
 import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime'
 import { GetPrereqReport } from '../wailsjs/go/services/PrereqService'
 
+console.log('[DEBUG] App.jsx: File loaded, defining AppContent component')
+
 function AppContent() {
+  console.log('[DEBUG] App.jsx: AppContent component rendering')
   const store = useAppStore()
   
   // Log when component first mounts
@@ -169,13 +172,20 @@ function AppContent() {
 }
 
 function App() {
-  return (
-    <AppStoreProvider>
-      <BrowserRouter>
-        <AppContent />
-      </BrowserRouter>
-    </AppStoreProvider>
-  )
+  console.log('[DEBUG] App.jsx: App component rendering')
+  try {
+    return (
+      <AppStoreProvider>
+        <BrowserRouter>
+          <AppContent />
+        </BrowserRouter>
+      </AppStoreProvider>
+    )
+  } catch (err) {
+    console.error('[DEBUG] App.jsx: Error in App component:', err)
+    return <div style={{color: 'red', padding: '20px'}}>Error in App: {err.message}</div>
+  }
 }
 
+console.log('[DEBUG] App.jsx: About to export App')
 export default App

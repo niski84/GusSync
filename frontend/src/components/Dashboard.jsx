@@ -61,25 +61,38 @@ export default function Dashboard() {
   }
 
   const handleStartBackup = async () => {
+    console.log('[Dashboard] handleStartBackup called')
+    console.log('[Dashboard] canRunActions:', canRunActions)
+    
     if (!canRunActions) {
+      console.log('[Dashboard] Cannot run actions, returning')
       return
     }
 
     // Ensure destination is selected
     let destPath = destinationPath || backupState.destPath
+    console.log('[Dashboard] destPath:', destPath)
+    
     if (!destPath) {
+      console.log('[Dashboard] No destPath, opening dialog...')
       destPath = await handleChooseDestination()
       if (!destPath) {
+        console.log('[Dashboard] User cancelled destination selection')
         return // User cancelled
       }
     }
 
+    console.log('[Dashboard] About to call StartBackup with destPath:', destPath)
     setIsStarting(true)
     setError(null)
 
     try {
-      await StartBackup('', destPath, 'mount')
-      // Don't set isStarting to false here - let events handle it
+      console.log('[Dashboard] Calling StartBackup...')
+      const taskId = await StartBackup('', destPath, 'mount')
+      console.log('[Dashboard] Backup task started, taskId:', taskId)
+      // Reset isStarting - if backend sent task:update, isRunning will be true
+      // and UI will show "Running..." instead of "Start Backup"
+      setIsStarting(false)
     } catch (error) {
       console.error('[Dashboard] Failed to start backup:', error)
       setError(error.message || String(error))
@@ -97,25 +110,32 @@ export default function Dashboard() {
   }
 
   const handleVerifyBackup = async () => {
+    console.log('[Dashboard] handleVerifyBackup called')
     const sourcePath = backupState.sourcePath
-    const destPath = destinationPath || backupState.destPath
+    let destPath = destinationPath || backupState.destPath
 
-    if (!sourcePath || !destPath) {
-      setError('Please set source and destination paths before verifying')
-      return
+    if (!destPath) {
+      console.log('[Dashboard] No destPath, opening dialog...')
+      destPath = await handleChooseDestination()
+      if (!destPath) {
+        console.log('[Dashboard] User cancelled destination selection')
+        return
+      }
     }
 
     setIsVerifying(true)
     setError(null)
 
     try {
-      await StartVerify({
-        sourcePath: sourcePath,
+      console.log('[Dashboard] Calling StartVerify...')
+      // Level is currently ignored by backend but kept for future use
+      const taskId = await StartVerify({
+        sourcePath: sourcePath || '',
         destPath: destPath,
-        level: 'full', // Use 'full' for complete verification, 'quick' for faster check
+        mode: 'auto', // Backend will auto-detect available state files
       })
-      // Verification started - backend will emit events for progress
-      console.log('[Dashboard] Verify started')
+      console.log('[Dashboard] Verify task started, taskId:', taskId)
+      setIsVerifying(false)
     } catch (error) {
       console.error('[Dashboard] Failed to start verification:', error)
       setError(`Failed to start verification: ${error.message || error}`)
@@ -124,26 +144,32 @@ export default function Dashboard() {
   }
 
   const handleCleanupSource = async () => {
+    console.log('[Dashboard] handleCleanupSource called')
     const sourcePath = backupState.sourcePath
-    const destPath = destinationPath || backupState.destPath
+    let destPath = destinationPath || backupState.destPath
 
-    if (!sourcePath || !destPath) {
-      setError('Please set source and destination paths before cleanup')
-      return
+    if (!destPath) {
+      console.log('[Dashboard] No destPath, opening dialog...')
+      destPath = await handleChooseDestination()
+      if (!destPath) {
+        console.log('[Dashboard] User cancelled destination selection')
+        return
+      }
     }
 
     setIsCleaning(true)
     setError(null)
 
     try {
-      await StartCleanup({
-        sourceRoot: sourcePath,
+      console.log('[Dashboard] Calling StartCleanup...')
+      const taskId = await StartCleanup({
+        sourceRoot: sourcePath || '',
         destRoot: destPath,
         stateFiles: [], // Empty array means auto-detect
         processBoth: true, // Process both mount and adb state files if available
       })
-      // Cleanup started - backend will emit events for progress
-      console.log('[Dashboard] Cleanup started')
+      console.log('[Dashboard] Cleanup task started, taskId:', taskId)
+      setIsCleaning(false)
     } catch (error) {
       console.error('[Dashboard] Failed to start cleanup:', error)
       setError(`Failed to start cleanup: ${error.message || error}`)
@@ -368,6 +394,8 @@ export default function Dashboard() {
                   Completed: {backupState.summaryStats?.filesCompleted || 0} | 
                   Skipped: {backupState.summaryStats?.filesSkipped || 0} | 
                   Failed: {backupState.summaryStats?.filesFailed || 0} | 
+                  Timeouts: {backupState.summaryStats?.timeoutSkips || 0} 
+                  {backupState.summaryStats?.consecutiveSkips > 0 && ` (consecutive: ${backupState.summaryStats.consecutiveSkips})`} |
                   Speed: {backupState.summaryStats?.speed > 0 ? `${backupState.summaryStats.speed.toFixed(2)} ${backupState.summaryStats.speedUnit}` : '0.00 MB/s'}
                 </span>
               </div>
@@ -433,15 +461,50 @@ export default function Dashboard() {
           </>
         )}
 
-        {!backupState.isRunning && !backupState.isSuccess && !backupState.isError && (
+        {!backupState.isRunning && !backupState.isSuccess && !backupState.isError && !backupState.lastCompletedTask && (
           <div className="flex-1 flex items-center justify-center text-center px-4">
             <p className="text-slate-400 italic">Ready to fetch some data?<br/>Select a destination and click Start.</p>
           </div>
         )}
 
-        {backupState.isSuccess && (
+        {(backupState.isSuccess || backupState.lastCompletedTask) && !backupState.isRunning && (
           <div className="flex-1 flex flex-col justify-center">
-            <p className="text-emerald-500 font-medium text-center mb-4">✓ Backup completed successfully</p>
+            {/* Dynamic success message based on task type */}
+            {(() => {
+              const task = backupState.activeTask || backupState.lastCompletedTask
+              const taskType = task?.type || 'copy.sync'
+              const message = task?.message || ''
+              
+              let icon = '✓'
+              let title = 'Task completed successfully'
+              let color = 'text-emerald-500'
+              
+              if (taskType.includes('verify')) {
+                icon = '🔍'
+                title = 'Verification complete'
+              } else if (taskType.includes('cleanup')) {
+                icon = '🧹'
+                title = 'Cleanup complete'
+              } else if (taskType.includes('copy') || taskType.includes('sync')) {
+                icon = '✓'
+                title = 'Backup completed successfully'
+              }
+              
+              if (task?.state === 'failed') {
+                icon = '❌'
+                title = 'Task failed'
+                color = 'text-red-500'
+              }
+              
+              return (
+                <>
+                  <p className={`${color} font-medium text-center mb-2`}>{icon} {title}</p>
+                  {message && (
+                    <p className="text-slate-400 text-sm text-center mb-4">{message}</p>
+                  )}
+                </>
+              )
+            })()}
             
             {/* Final summary stats - show if we have any data */}
             {backupState.summaryStats && (backupState.summaryStats.totalFiles > 0 || backupState.summaryStats.filesCompleted > 0 || backupState.summaryStats.filesSkipped > 0) && (
@@ -452,7 +515,7 @@ export default function Dashboard() {
                     <p className="text-lg font-bold text-slate-300">{backupState.summaryStats.totalFiles || '—'}</p>
                   </div>
                   <div>
-                    <p className="text-[10px] text-slate-500 uppercase">Copied</p>
+                    <p className="text-[10px] text-slate-500 uppercase">Completed</p>
                     <p className="text-lg font-bold text-emerald-400">{backupState.summaryStats.filesCompleted || 0}</p>
                   </div>
                   <div>
@@ -492,6 +555,16 @@ export default function Dashboard() {
                 {backupState.discoveryState.totalFilesFound.toLocaleString()} files discovered across {backupState.discoveryState.completedDirectories} directories
               </p>
             )}
+            
+            {/* Dismiss button for completed tasks */}
+            {backupState.lastCompletedTask && !backupState.isRunning && (
+              <button
+                onClick={() => backupState.clearLastCompletedTask()}
+                className="mt-4 px-4 py-2 text-sm text-slate-400 hover:text-white transition-colors self-center"
+              >
+                Dismiss
+              </button>
+            )}
           </div>
         )}
 
@@ -502,79 +575,54 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Card: Directory Discovery Progress */}
-      <div className="bg-slate-800 rounded-lg p-6">
-        <h3 className="text-xl font-semibold text-white mb-4">Directory Discovery</h3>
-        
-        {backupState.discoveryState.isDiscovering && (
-          <>
-            {/* Current directory being scanned */}
-            <div className="mb-4">
-              <p className="text-sm text-slate-400 mb-1">Scanning:</p>
-              <p className="text-sm text-slate-300 font-mono truncate" title={backupState.discoveryState.currentDirectory}>
-                {truncatePath(backupState.discoveryState.currentDirectory, 40)}
-              </p>
-            </div>
-            
-            {/* Progress bar for directories */}
-            {backupState.discoveryState.totalDirectories > 0 && (
-              <div className="w-full bg-slate-700 rounded-full h-4 mb-4">
-                <div
-                  className="bg-blue-500 h-full rounded-full transition-all"
-                  style={{
-                    width: `${(backupState.discoveryState.completedDirectories / backupState.discoveryState.totalDirectories) * 100}%`
-                  }}
-                />
-              </div>
-            )}
-            
-            {/* Stats */}
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-slate-400">Directories</p>
-                <p className="text-white font-semibold">
-                  {backupState.discoveryState.completedDirectories} / {backupState.discoveryState.totalDirectories || '?'}
-                </p>
-              </div>
-              <div>
-                <p className="text-slate-400">Files Found</p>
-                <p className="text-white font-semibold">
-                  {backupState.discoveryState.totalFilesFound.toLocaleString()}
-                </p>
-              </div>
-              {backupState.discoveryState.timeoutDirectories > 0 && (
-                <div>
-                  <p className="text-amber-500">Timeouts</p>
-                  <p className="text-amber-500">{backupState.discoveryState.timeoutDirectories}</p>
-                </div>
-              )}
-              {backupState.discoveryState.errorDirectories > 0 && (
-                <div>
-                  <p className="text-red-500">Errors</p>
-                  <p className="text-red-500">{backupState.discoveryState.errorDirectories}</p>
-                </div>
-              )}
-            </div>
-          </>
-        )}
-        
-        {!backupState.discoveryState.isDiscovering && backupState.discoveryState.totalFilesFound > 0 && (
-          <div>
-            <p className="text-slate-400 text-sm mb-2">
-              Discovery complete: <span className="text-white font-semibold">{backupState.discoveryState.totalFilesFound.toLocaleString()}</span> files found
+      {/* Card: Directory Discovery Progress - only show during active operations */}
+      {backupState.discoveryState.isDiscovering && (
+        <div className="bg-slate-800 rounded-lg p-6">
+          <h3 className="text-xl font-semibold text-white mb-4">
+            {backupState.activeTask?.type?.includes('cleanup') ? '🧹 Cleanup Progress' : 
+             backupState.activeTask?.type?.includes('verify') ? '🔍 Verification Progress' : 
+             'Directory Discovery'}
+          </h3>
+          
+          {/* Current directory being scanned */}
+          <div className="mb-4">
+            <p className="text-sm text-slate-400 mb-1">Processing:</p>
+            <p className="text-sm text-slate-300 font-mono truncate" title={backupState.discoveryState.currentDirectory}>
+              {truncatePath(backupState.discoveryState.currentDirectory || backupState.statusMessage, 40)}
             </p>
-            {backupState.discoveryState.completedDirectories > 0 && (
-              <p className="text-slate-400 text-xs">
-                Scanned {backupState.discoveryState.completedDirectories} directories
-              </p>
-            )}
           </div>
-        )}
-        
-        {!backupState.discoveryState.isDiscovering && backupState.discoveryState.totalFilesFound === 0 && (
-          <p className="text-slate-400 text-sm">Discovery will start when backup begins</p>
-        )}
-      </div>
+          
+          {/* Progress bar for directories */}
+          {backupState.discoveryState.totalDirectories > 0 && (
+            <div className="w-full bg-slate-700 rounded-full h-4 mb-4">
+              <div
+                className="bg-blue-500 h-full rounded-full transition-all"
+                style={{
+                  width: `${(backupState.discoveryState.completedDirectories / backupState.discoveryState.totalDirectories) * 100}%`
+                }}
+              />
+            </div>
+          )}
+          
+          {/* Stats */}
+          <div className="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <p className="text-slate-400">Progress</p>
+              <p className="text-white font-semibold">
+                {backupState.progress > 0 ? `${backupState.progress.toFixed(0)}%` : 'Processing...'}
+              </p>
+            </div>
+            <div>
+              <p className="text-slate-400">Files</p>
+              <p className="text-white font-semibold">
+                {backupState.discoveryState.totalFilesFound > 0 
+                  ? backupState.discoveryState.totalFilesFound.toLocaleString() 
+                  : '—'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Quick Actions - Full Width */}
       <div className="md:col-span-2 bg-slate-800 rounded-lg p-6 flex flex-col">

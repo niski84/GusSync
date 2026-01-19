@@ -28,6 +28,8 @@ type App struct {
 	cleanupService *services.CleanupService
 	logService     *services.LogService
 	jobManager     *services.JobManager
+	systemService  *services.SystemService
+	configService  *services.ConfigService
 	logger         *log.Logger
 }
 
@@ -43,8 +45,6 @@ func NewApp() *App {
 
 // OnStartup is called when the app starts (called by Wails after frontend loads)
 func (a *App) OnStartup(ctx context.Context) {
-	runtime.WindowCenter(ctx)
-	startTime := time.Now()
 	a.ctx = ctx
 	logger := log.New(os.Stderr, "[GusSync] ", log.LstdFlags|log.Lshortfile)
 	
@@ -54,6 +54,7 @@ func (a *App) OnStartup(ctx context.Context) {
 	// Initialize config service first
 	configStart := time.Now()
 	configService, err := services.NewConfigService(logger)
+	a.configService = configService
 	configDuration := time.Since(configStart)
 	if err != nil {
 		logger.Printf("[TIMING %s] [App] OnStartup: Config service initialization FAILED (took %v): %v", time.Now().Format("2006-01-02 15:04:05.000"), configDuration, err)
@@ -61,6 +62,22 @@ func (a *App) OnStartup(ctx context.Context) {
 	} else {
 		logger.Printf("[TIMING %s] [App] OnStartup: Config service initialized (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), configDuration)
 	}
+
+	// Restore window geometry if available
+	if a.configService != nil {
+		cfg := a.configService.GetConfig()
+		if cfg.WindowWidth > 0 && cfg.WindowHeight > 0 {
+			logger.Printf("[App] OnStartup: Restoring window geometry: %dx%d at (%d,%d)", cfg.WindowWidth, cfg.WindowHeight, cfg.WindowX, cfg.WindowY)
+			runtime.WindowSetSize(ctx, cfg.WindowWidth, cfg.WindowHeight)
+			runtime.WindowSetPosition(ctx, cfg.WindowX, cfg.WindowY)
+		} else {
+			runtime.WindowCenter(ctx)
+		}
+	} else {
+		runtime.WindowCenter(ctx)
+	}
+
+	startTime := time.Now()
 
 	// Update service contexts using the Wails context provided in OnStartup
 	// CRITICAL: We MUST NOT replace the service instances because Wails has already 
@@ -104,6 +121,11 @@ func (a *App) OnStartup(ctx context.Context) {
 	logDuration := time.Since(logStart)
 	logger.Printf("[TIMING %s] [App] OnStartup: LogService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), logDuration)
 
+	systemStart := time.Now()
+	a.systemService.SetContext(ctx)
+	systemDuration := time.Since(systemStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: SystemService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), systemDuration)
+
 	totalServiceDuration := time.Since(startTime)
 	logger.Printf("[TIMING %s] [App] OnStartup: All services updated (took %v total)", time.Now().Format("2006-01-02 15:04:05.000"), totalServiceDuration)
 
@@ -127,6 +149,20 @@ func (a *App) OnStartup(ctx context.Context) {
 // OnShutdown is called when the app is shutting down
 func (a *App) OnShutdown(ctx context.Context) {
 	a.logger.Printf("[App] OnShutdown: Shutting down...")
+
+	// Save window geometry
+	if a.configService != nil && a.ctx != nil {
+		x, y := runtime.WindowGetPosition(a.ctx)
+		w, h := runtime.WindowGetSize(a.ctx)
+		if w > 0 && h > 0 {
+			a.logger.Printf("[App] OnShutdown: Saving window geometry: %dx%d at (%d,%d)", w, h, x, y)
+			if err := a.configService.SetWindowGeometry(x, y, w, h); err != nil {
+				a.logger.Printf("[App] OnShutdown: Failed to save window geometry: %v", err)
+			}
+		} else {
+			a.logger.Printf("[App] OnShutdown: Skipping save of invalid window geometry: %dx%d", w, h)
+		}
+	}
 
 	// Cancel any running jobs
 	if a.jobManager != nil {
@@ -179,9 +215,10 @@ func Run() error {
 	prereqService := services.NewPrereqService(ctx, logger)
 	deviceService := services.NewDeviceService(ctx, logger)
 	copyService := services.NewCopyService(ctx, logger, jobManager, deviceService)
-	verifyService := services.NewVerifyService(ctx, logger, jobManager)
-	cleanupService := services.NewCleanupService(ctx, logger, jobManager)
+	verifyService := services.NewVerifyService(ctx, logger, jobManager, deviceService)
+	cleanupService := services.NewCleanupService(ctx, logger, jobManager, deviceService)
 	logService := services.NewLogService(ctx, logger)
+	systemService := services.NewSystemService(ctx, logger)
 	serviceInitDuration := time.Since(serviceInitStart)
 	logger.Printf("[TIMING %s] [App] Run(): Services pre-initialized (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), serviceInitDuration)
 
@@ -193,6 +230,7 @@ func Run() error {
 	appInstance.verifyService = verifyService
 	appInstance.cleanupService = cleanupService
 	appInstance.logService = logService
+	appInstance.systemService = systemService
 
 	wailsCallStart := time.Now()
 	logger.Printf("[TIMING %s] [App] Run(): About to call wails.Run() - initialization took %v so far", time.Now().Format("2006-01-02 15:04:05.000"), time.Since(appStartTime))
@@ -217,6 +255,7 @@ func Run() error {
 			cleanupService,
 			logService,
 			jobManager,
+			systemService,
 		},
 	})
 	

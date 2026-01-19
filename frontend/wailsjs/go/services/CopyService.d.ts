@@ -11,4 +11,4 @@ export function SetConfig(arg1:services.ConfigService):Promise<void>;
 
 export function SetContext(arg1:context.Context):Promise<void>;
 
-export function StartBackup(arg1:string,arg2:string,arg3:string):Promise<void>;
+export function StartBackup(arg1:string,arg2:string,arg3:string):Promise<string>;

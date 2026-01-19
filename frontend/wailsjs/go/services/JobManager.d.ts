@@ -5,12 +5,14 @@ import {context} from '../models';
 
 export function CancelJob():Promise<void>;
 
-export function CompleteJob(arg1:boolean):Promise<void>;
+export function CancelTask(arg1:string):Promise<void>;
 
 export function GetJobStatus():Promise<services.JobInfo>;
+
+export function GetTask(arg1:string):Promise<services.TaskSnapshot>;
+
+export function ListTasks():Promise<Array<services.TaskSnapshot>>;
 
 export function SetContext(arg1:context.Context):Promise<void>;
 
 export function SetProcessPID(arg1:number,arg2:number):Promise<void>;
-
-export function StartJob(arg1:string):Promise<string>;

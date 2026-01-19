@@ -1,30 +1,32 @@
 package services
 
 import (
+	"GusSync/pkg/engine"
+	"GusSync/pkg/state"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
-
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// CleanupService handles cleanup operations (wraps existing cleanup logic)
+// CleanupService handles cleanup operations using the core engine
 type CleanupService struct {
-	ctx        context.Context
-	logger     *log.Logger
-	jobManager *JobManager
+	ctx           context.Context
+	logger        *log.Logger
+	jobManager    *JobManager
+	deviceService *DeviceService
 }
 
 const stateFileName = "gus_state.md"
 
 // NewCleanupService creates a new CleanupService
-func NewCleanupService(ctx context.Context, logger *log.Logger, jobManager *JobManager) *CleanupService {
+func NewCleanupService(ctx context.Context, logger *log.Logger, jobManager *JobManager, deviceService *DeviceService) *CleanupService {
 	return &CleanupService{
-		ctx:        ctx,
-		logger:     logger,
-		jobManager: jobManager,
+		ctx:           ctx,
+		logger:        logger,
+		jobManager:    jobManager,
+		deviceService: deviceService,
 	}
 }
 
@@ -79,13 +81,18 @@ func (s *CleanupService) DetectStateFiles(destRoot string) ([]StateFileInfo, err
 }
 
 // StartCleanup starts a cleanup operation (non-blocking)
-func (s *CleanupService) StartCleanup(req CleanupRequest) error {
+func (s *CleanupService) StartCleanup(req CleanupRequest) (string, error) {
 	s.logger.Printf("[CleanupService] StartCleanup: sourceRoot=%s destRoot=%s stateFiles=%v processBoth=%v", req.SourceRoot, req.DestRoot, req.StateFiles, req.ProcessBoth)
 
+	params := map[string]string{
+		"sourceRoot": req.SourceRoot,
+		"destRoot":   req.DestRoot,
+	}
+
 	// Start job
-	jobID, jobCtx, err := s.jobManager.StartJob("cleanup")
+	jobID, jobCtx, err := s.jobManager.startTask("cleanup.sync", "Initializing cleanup...", params)
 	if err != nil {
-		return fmt.Errorf("failed to start cleanup job: %w", err)
+		return "", fmt.Errorf("failed to start cleanup task: %w", err)
 	}
 
 	// Determine which state files to process
@@ -94,10 +101,10 @@ func (s *CleanupService) StartCleanup(req CleanupRequest) error {
 		// Detect all available state files
 		detected, err := s.DetectStateFiles(req.DestRoot)
 		if err != nil {
-			return fmt.Errorf("failed to detect state files: %w", err)
+			return "", fmt.Errorf("failed to detect state files: %w", err)
 		}
 		if len(detected) == 0 {
-			return fmt.Errorf("no state files found in %s/mount or %s/adb", req.DestRoot, req.DestRoot)
+			return "", fmt.Errorf("no state files found in %s/mount or %s/adb", req.DestRoot, req.DestRoot)
 		}
 		// Extract modes
 		stateFilesToProcess = []string{}
@@ -108,44 +115,21 @@ func (s *CleanupService) StartCleanup(req CleanupRequest) error {
 
 	// Run cleanup in goroutine (non-blocking)
 	go func() {
-		defer s.jobManager.CompleteJob(true)
-
 		for _, mode := range stateFilesToProcess {
 			// Check if job was cancelled
 			select {
 			case <-jobCtx.Done():
 				s.logger.Printf("[CleanupService] StartCleanup: Job cancelled")
-				runtime.EventsEmit(s.ctx, "CleanupProgress", map[string]interface{}{
-					"jobId":  jobID,
-					"status": "cancelled",
-				})
 				return
 			default:
 			}
 
 			// Process this state file
-			err := s.processCleanupForMode(jobCtx, jobID, req.SourceRoot, req.DestRoot, mode)
-			if err != nil {
-				s.logger.Printf("[CleanupService] StartCleanup: Error processing %s mode: %v", mode, err)
-				runtime.EventsEmit(s.ctx, "CleanupProgress", map[string]interface{}{
-					"jobId":  jobID,
-					"status": "error",
-					"mode":   mode,
-					"error":  err.Error(),
-				})
-				// Continue to next mode
-				continue
-			}
+			_ = s.processCleanupForMode(jobCtx, jobID, req.SourceRoot, req.DestRoot, mode)
 		}
-
-		// Emit completion
-		runtime.EventsEmit(s.ctx, "CleanupProgress", map[string]interface{}{
-			"jobId":  jobID,
-			"status": "completed",
-		})
 	}()
 
-	return nil
+	return jobID, nil
 }
 
 // processCleanupForMode processes cleanup for a specific mode (mount or adb)
@@ -161,20 +145,36 @@ func (s *CleanupService) processCleanupForMode(ctx context.Context, jobID string
 		return fmt.Errorf("state file not found: %s", stateFile)
 	}
 
-	// Emit log line
-	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
-		"timestamp": fmt.Sprintf("%d", ctx.Value("timestamp")),
-		"level":     "info",
-		"message":   fmt.Sprintf("Processing cleanup for %s mode (state file: %s)", mode, stateFile),
-	})
+	reporter := &WailsReporter{ctx: s.ctx, jobID: jobID, jobManager: s.jobManager}
+	reporter.ReportLog("info", fmt.Sprintf("Processing cleanup for %s mode (state file: %s)", mode, stateFile))
+	reporter.ReportLog("info", "Loading state file...")
 
-	// TODO: Call existing runCleanupMode logic
-	// For now, this is a stub that will be wired to the actual cleanup function
-	// The existing cleanup logic is in cleanup.go:runCleanupMode()
-	// We need to refactor it slightly to support processing multiple state files
+	stateManager, err := state.NewStateManager(stateFile)
+	if err != nil {
+		return err
+	}
+	defer stateManager.Close()
 
-	// Note: The existing runCleanupMode only processes one state file (first found)
-	// We'll need to modify it or create a wrapper that can process a specific state file
+	cfg := engine.EngineConfig{
+		SourcePath: sourceRoot,
+		DestRoot:   destPath,
+		Mode:       mode,
+		NumWorkers: 2,
+		Reporter:   reporter,
+	}
+
+	e := engine.NewEngine(cfg, stateManager)
+	
+	s.jobManager.updateTaskProgress(jobID, TaskProgress{Phase: "cleaning"}, "Cleanup in progress...", nil)
+
+	results, err := e.RunCleanup(ctx)
+	if err != nil {
+		s.jobManager.failTask(jobID, err, "")
+		return err
+	}
+
+	message := fmt.Sprintf("Cleanup complete for %s: %d deleted, %d failed", mode, results.Deleted, results.Failed)
+	s.jobManager.completeTask(jobID, message)
 
 	return nil
 }

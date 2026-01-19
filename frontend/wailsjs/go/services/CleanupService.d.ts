@@ -9,4 +9,4 @@ export function DetectStateFiles(arg1:string):Promise<Array<services.StateFileIn
 
 export function SetContext(arg1:context.Context):Promise<void>;
 
-export function StartCleanup(arg1:services.CleanupRequest):Promise<void>;
+export function StartCleanup(arg1:services.CleanupRequest):Promise<string>;

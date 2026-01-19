@@ -2,6 +2,39 @@
 @tailwind components;
 @tailwind utilities;
 
+/* DEBUGGING: Add a visible test element to body */
+body {
+  background-color: #020617; /* slate-950 - should match app background */
+  color: white;
+}
+
+/* Debug: If nothing renders, at least we'll see this */
+body::before {
+  content: "CSS Loaded - Waiting for React...";
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  color: lime;
+  font-size: 12px;
+  z-index: 9999;
+  padding: 5px;
+  background: rgba(0,0,0,0.8);
+  display: none; /* Will show if React doesn't render */
+}
+
+/* If root is empty after 1 second, show the debug message */
+#root:empty {
+  min-height: 100vh;
+}
+
+#root:empty::before {
+  content: "ERROR: React root is empty!";
+  display: block;
+  color: red;
+  font-size: 24px;
+  padding: 20px;
+}
+
 body {
   margin: 0;
   padding: 0;

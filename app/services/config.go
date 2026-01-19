@@ -21,6 +21,10 @@ type Config struct {
 	SourcePath      string `json:"sourcePath"`
 	LastLogPath     string `json:"lastLogPath"`
 	LogDir          string `json:"logDir"`
+	WindowWidth     int    `json:"windowWidth"`
+	WindowHeight    int    `json:"windowHeight"`
+	WindowX         int    `json:"windowX"`
+	WindowY         int    `json:"windowY"`
 }
 
 // NewConfigService creates a new ConfigService
@@ -136,6 +140,19 @@ func (s *ConfigService) SetLastLogPath(path string) error {
 	}
 
 	s.config.LastLogPath = path
+	return s.Save()
+}
+
+// SetWindowGeometry sets the window geometry and saves the config
+func (s *ConfigService) SetWindowGeometry(x, y, width, height int) error {
+	if s.config == nil {
+		s.config = &Config{}
+	}
+
+	s.config.WindowX = x
+	s.config.WindowY = y
+	s.config.WindowWidth = width
+	s.config.WindowHeight = height
 	return s.Save()
 }
 
