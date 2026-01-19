@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { useAppStore } from '../store.jsx'
 import CheckCard from '../components/CheckCard'
 import StatusBadge from '../components/StatusBadge'
+import { RefreshNow } from '../../wailsjs/go/services/PrereqService'
 
 export default function Prerequisites() {
   const store = useAppStore()
@@ -10,6 +11,16 @@ export default function Prerequisites() {
   const { prereqReport } = store
   const [refreshing, setRefreshing] = useState(false)
   const [toast, setToast] = useState(null)
+
+  // Log on mount
+  useEffect(() => {
+    console.log('[Prerequisites] Component mounted')
+    if (window.go?.services?.PrereqService) {
+      console.log('[Prerequisites] PrereqService binding detected successfully')
+    } else {
+      console.warn('[Prerequisites] PrereqService binding NOT detected globally. This may be normal if using imports.')
+    }
+  }, [])
 
   // Show toast for a few seconds
   useEffect(() => {
@@ -20,19 +31,26 @@ export default function Prerequisites() {
   }, [toast])
 
   const handleRefresh = async () => {
-    if (!window.PrereqService) {
-      setToast('Error: PrereqService not available')
-      return
-    }
-
+    console.log('[Prerequisites] handleRefresh clicked')
+    
+    // Standard Wails pattern: Use imported functions from bindings
+    // These functions handle the window.go... path internally
     setRefreshing(true)
     try {
-      const report = await window.PrereqService.RefreshNow()
-      store.setPrereqReport(report)
-      setToast('Prerequisites refreshed!')
+      console.log('[Prerequisites] Calling RefreshNow binding...')
+      const report = await RefreshNow()
+      console.log('[Prerequisites] RefreshNow response:', report)
+      
+      if (report && report.overallStatus) {
+        store.setPrereqReport(report)
+        setToast('Prerequisites refreshed!')
+      } else {
+        console.warn('[Prerequisites] RefreshNow returned empty or invalid report:', report)
+        setToast('Refresh completed, but status unknown')
+      }
     } catch (err) {
-      console.error('Failed to refresh prerequisites:', err)
-      setToast('Error refreshing prerequisites')
+      console.error('[Prerequisites] Failed to refresh prerequisites:', err)
+      setToast(`Error: ${err.message || String(err)}`)
     } finally {
       setRefreshing(false)
     }

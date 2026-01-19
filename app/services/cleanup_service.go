@@ -28,6 +28,11 @@ func NewCleanupService(ctx context.Context, logger *log.Logger, jobManager *JobM
 	}
 }
 
+// SetContext updates the service context
+func (s *CleanupService) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
+
 // CleanupRequest represents a cleanup operation request
 type CleanupRequest struct {
 	SourceRoot  string   `json:"sourceRoot"`

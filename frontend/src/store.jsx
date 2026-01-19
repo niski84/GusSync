@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from 'react'
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react'
 
 const AppStoreContext = createContext(null)
 
@@ -38,7 +38,9 @@ export function AppStoreProvider({ children }) {
     setCurrentCheckID(checkID || null)
   }, [])
 
-  const store = {
+  // Memoize the store object to maintain stable reference across renders
+  // This prevents useEffect dependencies from triggering re-subscriptions
+  const store = useMemo(() => ({
     prereqReport,
     setPrereqReport,
     logs,
@@ -48,7 +50,15 @@ export function AppStoreProvider({ children }) {
     currentCheckID,
     setCurrentCheckID: updateCurrentCheckID, // Use wrapper function
     failedCheckIds: prereqReport?.checks?.filter(c => c.status === 'fail').map(c => c.id) || [],
-  }
+  }), [
+    prereqReport,
+    logs,
+    checkProgress,
+    currentCheckID,
+    addLog,
+    updateCheckProgress,
+    updateCurrentCheckID,
+  ])
 
   return (
     <AppStoreContext.Provider value={store}>

@@ -9,3 +9,7 @@ export function GetPrereqReport() {
 export function RefreshNow() {
   return window['go']['services']['PrereqService']['RefreshNow']();
 }
+
+export function SetContext(arg1) {
+  return window['go']['services']['PrereqService']['SetContext'](arg1);
+}

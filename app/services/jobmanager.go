@@ -26,6 +26,13 @@ func NewJobManager(ctx context.Context, logger *log.Logger) *JobManager {
 	}
 }
 
+// SetContext updates the context for the JobManager
+func (jm *JobManager) SetContext(ctx context.Context) {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+	jm.ctx = ctx
+}
+
 // JobInfo represents information about a running job
 type JobInfo struct {
 	ID        string    `json:"id"`

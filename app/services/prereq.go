@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"sync"
 	"strings"
 	"time"
 
@@ -19,6 +20,17 @@ type PrereqService struct {
 	ctx        context.Context
 	logger     *log.Logger
 	lastReport *PrereqReport
+	reportMu   sync.Mutex // Protect lastReport access
+	errorFile  *os.File
+	errorLog   *log.Logger
+	errorMutex sync.Mutex
+	firstCall  time.Time // Track when GetPrereqReport was first called
+	firstCallMu sync.Mutex
+	
+	// Singleflight logic to prevent concurrent check runs
+	runMu      sync.Mutex
+	isRunning  bool
+	waiters    []chan struct{}
 }
 
 // NewPrereqService creates a new PrereqService
@@ -27,6 +39,11 @@ func NewPrereqService(ctx context.Context, logger *log.Logger) *PrereqService {
 		ctx:    ctx,
 		logger: logger,
 	}
+}
+
+// SetContext updates the context for the PrereqService
+func (s *PrereqService) SetContext(ctx context.Context) {
+	s.ctx = ctx
 }
 
 // PrereqCheck represents a single prerequisite check
@@ -47,21 +64,94 @@ type PrereqReport struct {
 	Timestamp     time.Time    `json:"timestamp"`
 }
 
-// RefreshNow forces an immediate prerequisite check and returns the report
+// RefreshNow forces an immediate prerequisite check and returns the report (bypasses cache)
 func (s *PrereqService) RefreshNow() (PrereqReport, error) {
-	s.logger.Printf("[PrereqService] RefreshNow: Forcing immediate prerequisite check")
-	return s.GetPrereqReport(), nil
+	s.logger.Printf("[PrereqService] RefreshNow: Forcing immediate prerequisite check (bypassing cache)")
+	return s.getPrereqReportInternal(true), nil
 }
 
-// GetPrereqReport returns the current prerequisite status report
-func (s *PrereqService) GetPrereqReport() PrereqReport {
-	s.logger.Printf("[PrereqService] GetPrereqReport: Generating prerequisite report...")
+// getPrereqReportInternal performs the actual check (used by both GetPrereqReport and RefreshNow)
+func (s *PrereqService) getPrereqReportInternal(forceRefresh bool) PrereqReport {
+	// Check cache first if not forcing refresh
+	if !forceRefresh {
+		s.reportMu.Lock()
+		if s.lastReport != nil {
+			cachedReport := *s.lastReport
+			s.reportMu.Unlock()
+			s.logger.Printf("[PrereqService] GetPrereqReport: Returning cached report (from %v)", cachedReport.Timestamp)
+			return cachedReport
+		}
+		s.reportMu.Unlock()
+	}
+
+	// Singleflight logic: if already running, wait for completion
+	s.runMu.Lock()
+	if s.isRunning {
+		s.logDebug("[PrereqService] GetPrereqReport: Checks already in progress, waiting...")
+		ch := make(chan struct{})
+		s.waiters = append(s.waiters, ch)
+		s.runMu.Unlock()
+		
+		// Wait for completion (with timeout just in case)
+		select {
+		case <-ch:
+			// Done, now return the cached result
+			s.reportMu.Lock()
+			defer s.reportMu.Unlock()
+			if s.lastReport != nil {
+				return *s.lastReport
+			}
+			return PrereqReport{OverallStatus: "fail"} // Fallback
+		case <-time.After(10 * time.Second):
+			s.logDebug("[PrereqService] GetPrereqReport: Timeout waiting for concurrent checks")
+			return PrereqReport{OverallStatus: "fail"}
+		}
+	}
+	
+	// Mark as running
+	s.isRunning = true
+	s.runMu.Unlock()
+
+	// Ensure we signal waiters and mark as not running when we finish
+	defer func() {
+		s.runMu.Lock()
+		s.isRunning = false
+		for _, ch := range s.waiters {
+			close(ch)
+		}
+		s.waiters = nil
+		s.runMu.Unlock()
+	}()
+
+	// No cache or force refresh - run the actual checks
+	callTime := time.Now()
+	
+	// Track first call timing
+	s.firstCallMu.Lock()
+	isFirstCall := s.firstCall.IsZero()
+	if isFirstCall {
+		s.firstCall = callTime
+		s.firstCallMu.Unlock()
+		s.logDebug("[PrereqService] GetPrereqReport: ⭐ FIRST CALL ⭐ - This is the first time GetPrereqReport has been called")
+		s.logDebug("[PrereqService] GetPrereqReport: First call timestamp: %s", callTime.Format("2006-01-02 15:04:05.000"))
+		s.emitLogLine("info", "Starting prerequisite checks...")
+	} else {
+		timeSinceFirstCall := callTime.Sub(s.firstCall)
+		s.firstCallMu.Unlock()
+		s.logDebug("[PrereqService] GetPrereqReport: Call #%d - Time since first call: %v", int(timeSinceFirstCall.Seconds()/30)+2, timeSinceFirstCall)
+	}
+
+	startTime := time.Now()
+	s.logDebug("[PrereqService] GetPrereqReport: ENTRY - Starting prerequisite report generation")
 
 	report := PrereqReport{
 		OS:        goruntime.GOOS,
 		Checks:    []PrereqCheck{},
 		Timestamp: time.Now(),
 	}
+
+	initDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: Report struct initialized (took %v)", initDuration)
 
 	// Define all checks to run with their IDs and names
 	checkConfigs := []struct {
@@ -78,43 +168,97 @@ func (s *PrereqService) GetPrereqReport() PrereqReport {
 		{"filesystem_support", "File System Support", s.checkFileSystemSupport},
 	}
 
-	// Run all prerequisite checks and emit progress events
-	checks := make([]PrereqCheck, 0, len(checkConfigs))
+	// Run all prerequisite checks in parallel using goroutines
+	// This allows fast checks to complete immediately while slow ones continue
+	checks := make([]PrereqCheck, len(checkConfigs))
+	var wg sync.WaitGroup
+	var mu sync.Mutex // Protect the checks slice during concurrent writes
+
+	configSetupDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: Check configs defined (took %v total, %v since last)", configSetupDuration, configSetupDuration-initDuration)
+
+	// Start all checks concurrently
 	for i, config := range checkConfigs {
-		// Emit "starting" event
-		s.logger.Printf("[PrereqService] Emitting PrereqCheckProgress event: checkID=%s, checkName=%s, status=starting", config.id, config.name)
-		eventData := map[string]interface{}{
-			"checkID":   config.id,
-			"checkName": config.name,
-			"status":    "starting",
-		}
-		runtime.EventsEmit(s.ctx, "PrereqCheckProgress", eventData)
-		s.logger.Printf("[PrereqService] Emitted PrereqCheckProgress (starting) event for %s", config.id)
+		wg.Add(1)
+		// Capture values for goroutine
+		idx := i
+		checkID := config.id
+		checkName := config.name
+		checkFn := config.fn
 		
-		// Add small delay to allow UI to update (50ms)
-		time.Sleep(50 * time.Millisecond)
+		go func() {
+			defer wg.Done()
 
-		// Run the check
-		check := config.fn()
+			checkStartTime := time.Now()
+			s.logDebug("[PrereqService] Check STARTING: %s (%s)", checkID, checkName)
 
-		// Emit "completed" event with result
-		s.logger.Printf("[PrereqService] Emitting PrereqCheckProgress event: checkID=%s, checkName=%s, status=completed, resultStatus=%s", config.id, config.name, check.Status)
-		eventData = map[string]interface{}{
-			"checkID":   config.id,
-			"checkName": config.name,
-			"status":    "completed",
-			"result":    check,
-		}
-		runtime.EventsEmit(s.ctx, "PrereqCheckProgress", eventData)
-		s.logger.Printf("[PrereqService] Emitted PrereqCheckProgress (completed) event for %s", config.id)
+			// Emit "starting" event immediately
+			eventEmitStart := time.Now()
+			eventData := map[string]interface{}{
+				"checkID":   checkID,
+				"checkName": checkName,
+				"status":    "starting",
+			}
+			emitTime := time.Now()
+			runtime.EventsEmit(s.ctx, "PrereqCheckProgress", eventData)
+			eventEmitDuration := time.Since(eventEmitStart)
+			afterEmitTime := time.Now()
+			s.logDebug("[PrereqService] Check %s: About to emit 'starting' event at %s", checkID, emitTime.Format("15:04:05.000"))
+			s.logDebug("[PrereqService] Check %s: Emitted 'starting' event at %s (took %v)", checkID, afterEmitTime.Format("15:04:05.000"), eventEmitDuration)
+			
+			// Emit log line for UI
+			s.emitLogLine("info", fmt.Sprintf("Checking: %s", checkName))
 
-		checks = append(checks, check)
-		
-		// Add small delay between checks (except for last one)
-		if i < len(checkConfigs)-1 {
-			time.Sleep(50 * time.Millisecond)
-		}
+			// Run the check (this may take varying amounts of time)
+			checkRunStart := time.Now()
+			check := checkFn()
+			checkRunDuration := time.Since(checkRunStart)
+			s.logDebug("[PrereqService] Check %s: Function execution completed (took %v) - Status: %s", checkID, checkRunDuration, check.Status)
+
+			// Store result in correct position
+			mu.Lock()
+			checks[idx] = check
+			mu.Unlock()
+
+			// Emit "completed" event with result
+			eventEmitStart2 := time.Now()
+			eventData = map[string]interface{}{
+				"checkID":   checkID,
+				"checkName": checkName,
+				"status":    "completed",
+				"result":    check,
+			}
+			runtime.EventsEmit(s.ctx, "PrereqCheckProgress", eventData)
+			eventEmitDuration2 := time.Since(eventEmitStart2)
+			totalCheckDuration := time.Since(checkStartTime)
+			s.logDebug("[PrereqService] Check %s: Emitted 'completed' event (took %v), Total check time: %v", checkID, eventEmitDuration2, totalCheckDuration)
+			
+			// Emit log line for UI with status
+			statusEmoji := "✓"
+			statusText := "OK"
+			if check.Status == "fail" {
+				statusEmoji = "✗"
+				statusText = "FAILED"
+			} else if check.Status == "warn" {
+				statusEmoji = "⚠"
+				statusText = "WARNING"
+			}
+			s.emitLogLine(check.Status, fmt.Sprintf("%s %s: %s", statusEmoji, checkName, statusText))
+		}()
 	}
+
+	goroutineStartDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: All goroutines launched (took %v total)", goroutineStartDuration)
+
+	// Wait for all checks to complete
+	waitStartTime := time.Now()
+	wg.Wait()
+	waitDuration := time.Since(waitStartTime)
+	totalDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: All checks completed - Wait time: %v, Total time so far: %v", waitDuration, totalDuration)
+	
+	// Emit log line when all checks complete
+	s.emitLogLine("info", fmt.Sprintf("All prerequisite checks completed (took %.1fms)", float64(totalDuration)/float64(time.Millisecond)))
 
 	report.Checks = checks
 
@@ -137,13 +281,91 @@ func (s *PrereqService) GetPrereqReport() PrereqReport {
 		report.OverallStatus = "ok"
 	}
 
+	// Cache the report
+	s.reportMu.Lock()
 	s.lastReport = &report
-	s.logger.Printf("[PrereqService] Report generated: overallStatus=%s, checks=%d", report.OverallStatus, len(report.Checks))
+	s.reportMu.Unlock()
+	
+	statusCalcDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: Status calculated (took %v total)", statusCalcDuration)
 
-	// Emit event to frontend
+	// Emit final status log
+	overallStatusEmoji := "✓"
+	if report.OverallStatus == "fail" {
+		overallStatusEmoji = "✗"
+	} else if report.OverallStatus == "warn" {
+		overallStatusEmoji = "⚠"
+	}
+	s.emitLogLine(report.OverallStatus, fmt.Sprintf("%s System Status: %s", overallStatusEmoji, strings.ToUpper(report.OverallStatus)))
+
+	// Emit PrereqReport event to notify frontend that checks are complete
+	// This is the industry-standard pattern: emit an event when async operation completes
 	runtime.EventsEmit(s.ctx, "PrereqReport", report)
+	s.logDebug("[PrereqService] GetPrereqReport: Emitted PrereqReport event (checks complete)")
+
+	finalDuration := time.Since(startTime)
+	s.logDebug("[PrereqService] GetPrereqReport: EXIT - Total function time: %v", finalDuration)
 
 	return report
+}
+
+// getErrorLogPath returns the path to the error log file
+func (s *PrereqService) getErrorLogPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	logDir := filepath.Join(homeDir, ".gussync", "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return ""
+	}
+	return filepath.Join(logDir, "errors.log")
+}
+
+// emitLogLine emits a LogLine event to the frontend UI
+func (s *PrereqService) emitLogLine(level, message string) {
+	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339Nano),
+		"level":     level, // "info", "warn", "error"
+		"message":   message,
+	})
+}
+
+// logDebug logs a debug message with timestamp to both stderr and error log file
+func (s *PrereqService) logDebug(format string, args ...interface{}) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	// Prepend timestamp to args
+	allArgs := append([]interface{}{timestamp}, args...)
+	message := fmt.Sprintf("[TIMING %s] "+format, allArgs...)
+	s.logger.Printf("%s", message)
+
+	// Also log to dedicated error file
+	s.errorMutex.Lock()
+	defer s.errorMutex.Unlock()
+
+	if s.errorFile == nil {
+		logPath := s.getErrorLogPath()
+		if logPath == "" {
+			return
+		}
+		file, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			s.logger.Printf("[PrereqService] logDebug: Failed to open error log file: %v", err)
+			return
+		}
+		s.errorFile = file
+		s.errorLog = log.New(file, "", log.LstdFlags)
+	}
+
+	if s.errorLog != nil {
+		s.errorLog.Printf("%s", message)
+		s.errorFile.Sync() // Flush immediately
+	}
+}
+
+// GetPrereqReport returns the current prerequisite status report (uses cache if available)
+func (s *PrereqService) GetPrereqReport() PrereqReport {
+	return s.getPrereqReportInternal(false)
 }
 
 // checkADB verifies that ADB is installed and accessible

@@ -46,6 +46,17 @@ export function useBackupState() {
     deltaMB: 0, // MB copied in last interval
   })
 
+  // Summary stats from CLI output
+  const [summaryStats, setSummaryStats] = useState({
+    totalFiles: 0,
+    filesCompleted: 0,
+    filesSkipped: 0,
+    filesFailed: 0,
+    speed: 0,
+    speedUnit: 'MB/s',
+    speedMBps: 0,
+  })
+
   useEffect(() => {
     // Runtime check - only set up listeners in Wails environment
     if (!window.runtime) {
@@ -122,15 +133,31 @@ export function useBackupState() {
       
       // Update MB progress tracking
       if (data.deltaMB !== undefined) {
-        setMbProgress(prev => ({
-          ...prev,
-          deltaMB: data.deltaMB || 0,
-          totalMBCopied: prev.totalMBCopied + (data.deltaMB || 0),
-        }))
+        setMbProgress(prev => {
+          const newTotalCopied = prev.totalMBCopied + (data.deltaMB || 0)
+          console.log(`[useBackupState] Progress Update: Copied ${newTotalCopied.toFixed(2)} MB (+${data.deltaMB.toFixed(2)} MB)`)
+          return {
+            ...prev,
+            deltaMB: data.deltaMB || 0,
+            totalMBCopied: newTotalCopied,
+          }
+        })
       }
+
+      // Update summary stats from CLI output
+      setSummaryStats(prev => ({
+        totalFiles: data.totalFiles ?? prev.totalFiles,
+        filesCompleted: data.filesCompleted ?? prev.filesCompleted,
+        filesSkipped: data.filesSkipped ?? prev.filesSkipped,
+        filesFailed: data.filesFailed ?? prev.filesFailed,
+        speed: data.speed ?? prev.speed,
+        speedUnit: data.speedUnit ?? prev.speedUnit,
+        speedMBps: data.speedMBps ?? prev.speedMBps,
+      }))
 
       // Update file-based progress as fallback
       if (data.progressFiles !== undefined) {
+        console.log(`[useBackupState] Progress Update (Files): ${data.progressFiles.toFixed(2)}%`)
         setProgress(data.progressFiles)
       } else if (data.progress !== undefined) {
         setProgress(data.progress)
@@ -146,6 +173,7 @@ export function useBackupState() {
         const worker = {
           status: data.status || 'idle',
           fileName: data.fileName || '',
+          message: data.message || '', // Added this field
           progress: data.progress || 0,
           speed: data.speed || '',
           bytesCopied: data.bytesCopied || 0,
@@ -344,6 +372,7 @@ export function useBackupState() {
     workers, // All workers
     activeWorkers, // Only active (copying) workers
     mbProgress, // MB tracking: { totalMBDiscovered, totalMBCopied, deltaMB }
+    summaryStats, // CLI summary: { totalFiles, filesCompleted, filesSkipped, filesFailed, speed, speedUnit, speedMBps }
     // Helper functions
     isIdle: status === 'idle',
     isSuccess: status === 'success',

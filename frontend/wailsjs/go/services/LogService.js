@@ -9,3 +9,7 @@ export function ExportDiagnostics(arg1) {
 export function GetRecentLogs(arg1) {
   return window['go']['services']['LogService']['GetRecentLogs'](arg1);
 }
+
+export function SetContext(arg1) {
+  return window['go']['services']['LogService']['SetContext'](arg1);
+}

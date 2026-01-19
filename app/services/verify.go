@@ -21,6 +21,11 @@ func NewVerifyService(ctx context.Context, logger *log.Logger, jobManager *JobMa
 	}
 }
 
+// SetContext updates the context for the VerifyService
+func (s *VerifyService) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
+
 // VerifyRequest represents a verification operation request
 type VerifyRequest struct {
 	SourcePath string `json:"sourcePath"`

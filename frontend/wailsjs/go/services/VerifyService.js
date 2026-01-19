@@ -6,6 +6,10 @@ export function CancelVerify() {
   return window['go']['services']['VerifyService']['CancelVerify']();
 }
 
+export function SetContext(arg1) {
+  return window['go']['services']['VerifyService']['SetContext'](arg1);
+}
+
 export function StartVerify(arg1) {
   return window['go']['services']['VerifyService']['StartVerify'](arg1);
 }

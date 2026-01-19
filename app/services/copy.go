@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
@@ -82,6 +83,11 @@ func (s *CopyService) StartBackup(sourcePath, destPath, mode string) error {
 	}
 
 	// Emit initial status
+	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339Nano),
+		"level":     "info",
+		"message":   fmt.Sprintf("Starting backup job %s (mode: %s)", jobID, mode),
+	})
 	runtime.EventsEmit(s.ctx, "job:status", map[string]interface{}{
 		"id":      jobID,
 		"state":   "running",
@@ -155,6 +161,11 @@ func (s *CopyService) runBackup(ctx context.Context, jobID string, sourcePath, d
 	defer func() {
 		if r := recover(); r != nil {
 			s.logError("[CopyService] runBackup: Panic recovered in job %s: %v", jobID, r)
+			runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339Nano),
+				"level":     "error",
+				"message":   fmt.Sprintf("✗ Backup job %s crashed: %v", jobID, r),
+			})
 			runtime.EventsEmit(s.ctx, "job:error", map[string]interface{}{
 				"id":      jobID,
 				"message": fmt.Sprintf("Backup crashed: %v", r),
@@ -209,6 +220,13 @@ func (s *CopyService) runBackup(ctx context.Context, jobID string, sourcePath, d
 
 	s.logger.Printf("[CopyService] runBackup: Executing CLI: %s -source %s -dest %s -mode %s", execPath, sourcePath, destPath, mode)
 	s.logError("[CopyService] runBackup: Starting backup job %s - source=%s dest=%s mode=%s execPath=%s", jobID, sourcePath, destPath, mode, execPath)
+	
+	// Emit log line with backup details
+	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339Nano),
+		"level":     "info",
+		"message":   fmt.Sprintf("Backup running: source=%s dest=%s mode=%s", sourcePath, destPath, mode),
+	})
 
 	cmd := exec.CommandContext(ctx, execPath, "-source", sourcePath, "-dest", destPath, "-mode", mode)
 	
@@ -272,9 +290,14 @@ func (s *CopyService) runBackup(ctx context.Context, jobID string, sourcePath, d
 	// Wait for command to complete
 	err = cmd.Wait()
 
-	// Check if cancelled
+		// Check if cancelled
 	if ctx.Err() != nil {
 		s.logger.Printf("[CopyService] runBackup: Job %s was cancelled", jobID)
+		runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+			"timestamp": time.Now().Format(time.RFC3339Nano),
+			"level":     "warn",
+			"message":   fmt.Sprintf("Backup job %s cancelled by user", jobID),
+		})
 		runtime.EventsEmit(s.ctx, "job:status", map[string]interface{}{
 			"id":      jobID,
 			"state":   "cancelled",
@@ -301,6 +324,11 @@ func (s *CopyService) runBackup(ctx context.Context, jobID string, sourcePath, d
 
 	// Success
 	s.logger.Printf("[CopyService] runBackup: Job %s completed successfully", jobID)
+	runtime.EventsEmit(s.ctx, "LogLine", map[string]interface{}{
+		"timestamp": time.Now().Format(time.RFC3339Nano),
+		"level":     "info",
+		"message":   fmt.Sprintf("✓ Backup job %s completed successfully", jobID),
+	})
 	runtime.EventsEmit(s.ctx, "job:status", map[string]interface{}{
 		"id":      jobID,
 		"state":   "completed",
@@ -465,7 +493,8 @@ func (s *CopyService) parseAndEmitStats(line string, jobID string) {
 	// Calculate progress percentage (completed / total) - file-based fallback
 	if totalFiles, ok := stats["totalFiles"].(float64); ok && totalFiles > 0 {
 		if completed, ok := stats["filesCompleted"].(float64); ok {
-			stats["progressFiles"] = int((completed / totalFiles) * 100)
+			// Use float for more precision in progress bar
+			stats["progressFiles"] = (completed / totalFiles) * 100.0
 		}
 	}
 	
@@ -559,6 +588,10 @@ func (s *CopyService) parseAndEmitWorkerStatus(workerID int, status string, jobI
 			fileName := strings.TrimSpace(match[1])
 			workerData["fileName"] = fileName
 		}
+	} else {
+		// Fallback for any other status (e.g. "Hashing...", "Verifying...")
+		workerData["status"] = "active"
+		workerData["message"] = status
 	}
 
 	// Emit worker status event

@@ -25,6 +25,11 @@ func NewDeviceService(ctx context.Context, logger *log.Logger) *DeviceService {
 	}
 }
 
+// SetContext updates the context for the DeviceService
+func (s *DeviceService) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
+
 // DeviceInfo represents a discovered device
 type DeviceInfo struct {
 	ID        string `json:"id"`

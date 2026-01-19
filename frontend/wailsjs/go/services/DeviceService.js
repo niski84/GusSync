@@ -5,3 +5,7 @@
 export function GetDeviceStatus() {
   return window['go']['services']['DeviceService']['GetDeviceStatus']();
 }
+
+export function SetContext(arg1) {
+  return window['go']['services']['DeviceService']['SetContext'](arg1);
+}

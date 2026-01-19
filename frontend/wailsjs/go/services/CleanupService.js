@@ -10,6 +10,10 @@ export function DetectStateFiles(arg1) {
   return window['go']['services']['CleanupService']['DetectStateFiles'](arg1);
 }
 
+export function SetContext(arg1) {
+  return window['go']['services']['CleanupService']['SetContext'](arg1);
+}
+
 export function StartCleanup(arg1) {
   return window['go']['services']['CleanupService']['StartCleanup'](arg1);
 }

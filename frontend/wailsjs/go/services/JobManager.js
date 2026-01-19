@@ -14,6 +14,10 @@ export function GetJobStatus() {
   return window['go']['services']['JobManager']['GetJobStatus']();
 }
 
+export function SetContext(arg1) {
+  return window['go']['services']['JobManager']['SetContext'](arg1);
+}
+
 export function SetProcessPID(arg1, arg2) {
   return window['go']['services']['JobManager']['SetProcessPID'](arg1, arg2);
 }

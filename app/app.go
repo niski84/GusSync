@@ -10,7 +10,6 @@ import (
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"GusSync/app/services"
 )
@@ -41,44 +40,83 @@ func NewApp() *App {
 	}
 }
 
-// OnStartup is called when the app starts
+// OnStartup is called when the app starts (called by Wails after frontend loads)
 func (a *App) OnStartup(ctx context.Context) {
+	startTime := time.Now()
 	a.ctx = ctx
 	logger := log.New(os.Stderr, "[GusSync] ", log.LstdFlags|log.Lshortfile)
+	
+	timestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	logger.Printf("[TIMING %s] [App] OnStartup: ENTRY - OnStartup called by Wails (frontend should be loaded now)", timestamp)
 
 	// Initialize config service first
+	configStart := time.Now()
 	configService, err := services.NewConfigService(logger)
+	configDuration := time.Since(configStart)
 	if err != nil {
-		logger.Printf("[App] OnStartup: Failed to create config service: %v", err)
+		logger.Printf("[TIMING %s] [App] OnStartup: Config service initialization FAILED (took %v): %v", time.Now().Format("2006-01-02 15:04:05.000"), configDuration, err)
 		// Continue without config service
+	} else {
+		logger.Printf("[TIMING %s] [App] OnStartup: Config service initialized (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), configDuration)
 	}
 
-	// Initialize services
-	a.jobManager = services.NewJobManager(ctx, logger)
-	a.prereqService = services.NewPrereqService(ctx, logger)
-	a.deviceService = services.NewDeviceService(ctx, logger)
+	// Update service contexts using the Wails context provided in OnStartup
+	// CRITICAL: We MUST NOT replace the service instances because Wails has already 
+	// bound to the memory addresses of the instances created in Run().
+	// Instead, we call SetContext() on each existing instance.
+	serviceStart := time.Now()
+	a.jobManager.SetContext(ctx)
+	jobDuration := time.Since(serviceStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: JobManager context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), jobDuration)
 	
-	// Update existing copy service context (created in Run() for bindings)
-	// The bound service instance needs to have its context updated
+	prereqStart := time.Now()
+	a.prereqService.SetContext(ctx)
+	prereqDuration := time.Since(prereqStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: PrereqService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), prereqDuration)
+	
+	deviceStart := time.Now()
+	a.deviceService.SetContext(ctx)
+	deviceDuration := time.Since(deviceStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: DeviceService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), deviceDuration)
+	
+	copyStart := time.Now()
 	a.copyService.SetContext(ctx)
 	if configService != nil {
 		a.copyService.SetConfig(configService)
 	}
+	copyDuration := time.Since(copyStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: CopyService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), copyDuration)
 	
-	a.verifyService = services.NewVerifyService(ctx, logger, a.jobManager)
-	a.cleanupService = services.NewCleanupService(ctx, logger, a.jobManager)
-	a.logService = services.NewLogService(ctx, logger)
+	verifyStart := time.Now()
+	a.verifyService.SetContext(ctx)
+	verifyDuration := time.Since(verifyStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: VerifyService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), verifyDuration)
+	
+	cleanupStart := time.Now()
+	a.cleanupService.SetContext(ctx)
+	cleanupDuration := time.Since(cleanupStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: CleanupService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), cleanupDuration)
+	
+	logStart := time.Now()
+	a.logService.SetContext(ctx)
+	logDuration := time.Since(logStart)
+	logger.Printf("[TIMING %s] [App] OnStartup: LogService context updated (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), logDuration)
 
-	logger.Printf("[App] OnStartup: Services initialized")
+	totalServiceDuration := time.Since(startTime)
+	logger.Printf("[TIMING %s] [App] OnStartup: All services updated (took %v total)", time.Now().Format("2006-01-02 15:04:05.000"), totalServiceDuration)
 
-	// Start prerequisite polling loop
-	go a.startPrereqPolling(ctx)
+	// Run prerequisite checks immediately and cache results
+	logger.Printf("[TIMING %s] [App] OnStartup: Running prerequisite checks...", time.Now().Format("2006-01-02 15:04:05.000"))
+	go func() {
+		checkStart := time.Now()
+		report := a.prereqService.GetPrereqReport()
+		checkDuration := time.Since(checkStart)
+		logger.Printf("[TIMING %s] [App] OnStartup: Prerequisite checks completed (took %v) - report cached", time.Now().Format("2006-01-02 15:04:05.000"), checkDuration)
+		logger.Printf("[App] OnStartup: Overall status: %s", report.OverallStatus)
+	}()
 
-	// Emit initial prerequisite report
-	report := a.prereqService.GetPrereqReport()
-	runtime.EventsEmit(ctx, "PrereqReport", report)
-
-	logger.Printf("[App] OnStartup: Initial prerequisite report emitted")
+	totalDuration := time.Since(startTime)
+	logger.Printf("[TIMING %s] [App] OnStartup: EXIT - Total startup time: %v", time.Now().Format("2006-01-02 15:04:05.000"), totalDuration)
 }
 
 // OnShutdown is called when the app is shutting down
@@ -95,14 +133,13 @@ func (a *App) OnShutdown(ctx context.Context) {
 	a.logger.Printf("[App] OnShutdown: Shutdown complete")
 }
 
-// startPrereqPolling runs prerequisite checks periodically
+// startPrereqPolling - DISABLED: Prerequisites now only run once on startup and manually via RefreshNow()
+// This function has been disabled to prevent automatic polling every 30 seconds.
+// If periodic checks are needed in the future, this can be re-enabled.
+/*
 func (a *App) startPrereqPolling(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-
-	// Run immediately on startup
-	report := a.prereqService.GetPrereqReport()
-	runtime.EventsEmit(ctx, "PrereqReport", report)
 
 	for {
 		select {
@@ -115,18 +152,24 @@ func (a *App) startPrereqPolling(ctx context.Context) {
 		}
 	}
 }
+*/
 
 // Run starts the Wails application
 func Run() error {
+	appStartTime := time.Now()
+	appTimestamp := time.Now().Format("2006-01-02 15:04:05.000")
+	logger := log.New(os.Stderr, "[GusSync] ", log.LstdFlags|log.Lshortfile)
+	logger.Printf("[TIMING %s] [App] Run(): ENTRY - App Run() called, beginning initialization", appTimestamp)
+
 	appInstance := NewApp()
 
 	// Create a temporary context for service initialization
 	// Services will be fully initialized in OnStartup
 	ctx := context.Background()
-	logger := log.New(os.Stderr, "[GusSync] ", log.LstdFlags|log.Lshortfile)
 	
 	// Pre-initialize services for binding generation
 	// Wails needs these to generate the bindings
+	serviceInitStart := time.Now()
 	jobManager := services.NewJobManager(ctx, logger)
 	prereqService := services.NewPrereqService(ctx, logger)
 	deviceService := services.NewDeviceService(ctx, logger)
@@ -134,6 +177,8 @@ func Run() error {
 	verifyService := services.NewVerifyService(ctx, logger, jobManager)
 	cleanupService := services.NewCleanupService(ctx, logger, jobManager)
 	logService := services.NewLogService(ctx, logger)
+	serviceInitDuration := time.Since(serviceInitStart)
+	logger.Printf("[TIMING %s] [App] Run(): Services pre-initialized (took %v)", time.Now().Format("2006-01-02 15:04:05.000"), serviceInitDuration)
 
 	// Store services in app instance so they can be re-initialized in OnStartup
 	appInstance.jobManager = jobManager
@@ -143,6 +188,10 @@ func Run() error {
 	appInstance.verifyService = verifyService
 	appInstance.cleanupService = cleanupService
 	appInstance.logService = logService
+
+	wailsCallStart := time.Now()
+	logger.Printf("[TIMING %s] [App] Run(): About to call wails.Run() - initialization took %v so far", time.Now().Format("2006-01-02 15:04:05.000"), time.Since(appStartTime))
+	logger.Printf("[TIMING %s] [App] Run(): ⚠️  BLOCKING CALL ⚠️  - wails.Run() will block until frontend loads...", time.Now().Format("2006-01-02 15:04:05.000"))
 
 	err := wails.Run(&options.App{
 		Title:  "GusSync",
@@ -165,6 +214,13 @@ func Run() error {
 			jobManager,
 		},
 	})
+	
+	wailsReturnDuration := time.Since(wailsCallStart)
+	if err != nil {
+		logger.Printf("[TIMING %s] [App] Run(): wails.Run() returned ERROR after %v: %v", time.Now().Format("2006-01-02 15:04:05.000"), wailsReturnDuration, err)
+	} else {
+		logger.Printf("[TIMING %s] [App] Run(): wails.Run() returned successfully after %v", time.Now().Format("2006-01-02 15:04:05.000"), wailsReturnDuration)
+	}
 
 	return err
 }

@@ -24,6 +24,11 @@ func NewLogService(ctx context.Context, logger *log.Logger) *LogService {
 	}
 }
 
+// SetContext updates the service context
+func (s *LogService) SetContext(ctx context.Context) {
+	s.ctx = ctx
+}
+
 // LogEntry represents a single log entry
 type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`

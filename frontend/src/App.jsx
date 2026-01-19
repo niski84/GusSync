@@ -6,96 +6,150 @@ import Prerequisites from './pages/Prerequisites'
 import Logs from './pages/Logs'
 import { AppStoreProvider, useAppStore } from './store.jsx'
 import { EventsOn, EventsOff } from '../wailsjs/runtime/runtime'
+import { GetPrereqReport } from '../wailsjs/go/services/PrereqService'
 
 function AppContent() {
   const store = useAppStore()
+  
+  // Log when component first mounts
+  useEffect(() => {
+    const mountTime = performance.now()
+    const mountTimestamp = new Date().toISOString()
+    console.log(`[TIMING ${mountTimestamp}] [App] ⭐ COMPONENT MOUNT ⭐ - AppContent component mounted at ${mountTime.toFixed(2)}ms`)
+  }, [])
 
   useEffect(() => {
-    // Subscribe to Wails events
-    if (window.runtime) {
-      // PrereqReport event
-      const cleanupPrereq = EventsOn('PrereqReport', (data) => {
-        console.log('[App] PrereqReport event:', data)
-        store.setPrereqReport(data)
-      })
+    // Robust initialization: wait for Wails runtime and bindings
+    const initialize = async () => {
+      console.log('[App] Starting initialization...')
+      
+      // Step 1: Wait for Wails runtime (window.runtime)
+      let runtimeRetries = 0
+      while (!window.runtime && runtimeRetries < 20) {
+        await new Promise(r => setTimeout(r, 100))
+        runtimeRetries++
+      }
 
-      // PrereqCheckProgress event - track individual check progress
-      const cleanupCheckProgress = EventsOn('PrereqCheckProgress', (data) => {
-        console.log('[App] PrereqCheckProgress event received:', JSON.stringify(data))
-        
-        const checkID = data?.checkID
-        const status = data?.status
-        
-        if (!checkID) {
-          console.warn('[App] PrereqCheckProgress event missing checkID:', data)
-          return
-        }
-        
-        if (status === 'starting') {
-          console.log('[App] Check starting:', checkID)
-          store.setCurrentCheckID(checkID)
-          store.setCheckProgress(checkID, 'starting')
-        } else if (status === 'completed') {
-          console.log('[App] Check completed:', checkID)
-          store.setCheckProgress(checkID, 'completed')
-          // Clear current check after a brief delay to show completion
-          setTimeout(() => {
-            if (store.currentCheckID === checkID) {
-              store.setCurrentCheckID(null)
-            }
-          }, 200)
-        } else {
-          console.warn('[App] Unknown PrereqCheckProgress status:', status)
-        }
-      })
+      if (!window.runtime) {
+        console.error('[App] Wails runtime (window.runtime) never loaded.')
+        // Fallback for browser mode if needed, but for Wails it's fatal
+        return
+      }
 
-      // LogLine event
+      console.log(`[App] Wails runtime ready after ${runtimeRetries * 100}ms`)
+
+      // Step 2: Setup event listeners
+      // Now safe to call EventsOn as window.runtime is guaranteed
       const cleanupLog = EventsOn('LogLine', (data) => {
-        console.log('[App] LogLine event:', data)
         store.addLog(data)
       })
 
-      // Cleanup on unmount
-      return () => {
-        cleanupPrereq()
-        cleanupCheckProgress()
-        cleanupLog()
-      }
-    } else {
-      console.warn('[App] Wails runtime not available - running in browser mode')
-    }
-  }, [store])
+      const cleanupCheckProgress = EventsOn('PrereqCheckProgress', (data) => {
+        const checkID = data?.checkID
+        const status = data?.status
+        
+        if (!checkID) return
+        
+        if (status === 'starting') {
+          store.setCurrentCheckID(checkID)
+          store.setCheckProgress(checkID, 'starting')
+        } else if (status === 'completed') {
+          store.setCheckProgress(checkID, 'completed')
+          setTimeout(() => {
+            store.setCurrentCheckID((prev) => prev === checkID ? null : prev)
+          }, 200)
+        }
+      })
 
-  useEffect(() => {
-    // Load initial prereq report on mount
-    // Add small delay to ensure event listeners are set up first
-    const timer = setTimeout(() => {
-      if (window.PrereqService) {
-        window.PrereqService.GetPrereqReport()
-          .then((report) => {
-            console.log('[App] Initial PrereqReport:', report)
-            store.setPrereqReport(report)
-          })
-          .catch((err) => {
-            console.error('[App] Failed to get initial PrereqReport:', err)
-          })
+      const cleanupPrereqReport = EventsOn('PrereqReport', (report) => {
+        console.log('[App] Received PrereqReport event:', report)
+        if (report && report.overallStatus) {
+          store.setPrereqReport(report)
+        }
+      })
+
+      // Step 3: Wait for service bindings and fetch initial data
+      const initializePrereqReport = async () => {
+        // Wait for window.go.services.PrereqService to be available
+        let bindingRetries = 0
+        while ((!window.go || !window.go.services || !window.go.services.PrereqService) && bindingRetries < 20) {
+          await new Promise(r => setTimeout(r, 100))
+          bindingRetries++
+        }
+
+        if (!window.go?.services?.PrereqService) {
+          console.error('[App] PrereqService bindings never loaded. Path: window.go.services.PrereqService')
+          return
+        }
+
+        console.log(`[App] PrereqService ready after ${bindingRetries * 100}ms`)
+
+        let report = null
+        let attempts = 0
+        const maxPollAttempts = 15
+        const pollInterval = 100
+
+        try {
+          console.log('[App] Requesting PrereqReport (initial query)...')
+          // Use imported function which is a wrapper
+          report = await GetPrereqReport()
+          console.log('[App] Received Report (initial):', report)
+        } catch (err) {
+          console.error('[App] Initial fetch failed:', err)
+        }
+
+        while ((!report || !report.overallStatus) && attempts < maxPollAttempts) {
+          await new Promise(r => setTimeout(r, pollInterval))
+          attempts++
+          
+          try {
+            report = await GetPrereqReport()
+            if (report && report.overallStatus) {
+              console.log(`[App] PrereqReport ready after ${attempts} poll attempts:`, report)
+              break
+            }
+          } catch (err) {
+            console.error(`[App] Poll attempt ${attempts} failed:`, err)
+          }
+        }
+
+        if (report && report.overallStatus) {
+          store.setPrereqReport(report)
+        }
       }
-    }, 100) // Small delay to ensure listeners are ready
-    
-    return () => clearTimeout(timer)
-  }, [store])
+
+      await initializePrereqReport()
+
+      // Store cleanups so they can be called on unmount
+      window._wails_cleanups = () => {
+        cleanupLog()
+        cleanupCheckProgress()
+        cleanupPrereqReport()
+      }
+    }
+
+    initialize()
+
+    return () => {
+      if (window._wails_cleanups) {
+        window._wails_cleanups()
+        delete window._wails_cleanups
+      }
+    }
+  }, []) // Run once on mount
   
   // Reset check progress when prereqReport becomes null
   useEffect(() => {
     if (!store.prereqReport) {
       console.log('[App] Resetting check progress - prereqReport is null')
       // Reset all progress - clear each check
-      Object.keys(store.checkProgress || {}).forEach(checkID => {
+      const progressKeys = Object.keys(store.checkProgress || {})
+      progressKeys.forEach(checkID => {
         store.setCheckProgress(checkID, 'pending')
       })
       store.setCurrentCheckID(null)
     }
-  }, [store, store.prereqReport])
+  }, [store.prereqReport]) // Only depend on prereqReport, not entire store
 
   return (
     <div className="flex h-screen bg-slate-950 overflow-hidden">
