@@ -146,23 +146,33 @@ func (a *App) OnStartup(ctx context.Context) {
 	logger.Printf("[TIMING %s] [App] OnStartup: EXIT - Total startup time: %v", time.Now().Format("2006-01-02 15:04:05.000"), totalDuration)
 }
 
-// OnShutdown is called when the app is shutting down
-func (a *App) OnShutdown(ctx context.Context) {
-	a.logger.Printf("[App] OnShutdown: Shutting down...")
+// OnBeforeClose is called when the window is about to close (before it's destroyed)
+// This is the correct place to save window geometry because the window is still visible
+func (a *App) OnBeforeClose(ctx context.Context) bool {
+	a.logger.Printf("[App] OnBeforeClose: Window is about to close...")
 
-	// Save window geometry
+	// Save window geometry - the window is still available at this point
 	if a.configService != nil && a.ctx != nil {
 		x, y := runtime.WindowGetPosition(a.ctx)
 		w, h := runtime.WindowGetSize(a.ctx)
+		a.logger.Printf("[App] OnBeforeClose: Got window geometry: %dx%d at (%d,%d)", w, h, x, y)
 		if w > 0 && h > 0 {
-			a.logger.Printf("[App] OnShutdown: Saving window geometry: %dx%d at (%d,%d)", w, h, x, y)
+			a.logger.Printf("[App] OnBeforeClose: Saving window geometry: %dx%d at (%d,%d)", w, h, x, y)
 			if err := a.configService.SetWindowGeometry(x, y, w, h); err != nil {
-				a.logger.Printf("[App] OnShutdown: Failed to save window geometry: %v", err)
+				a.logger.Printf("[App] OnBeforeClose: Failed to save window geometry: %v", err)
 			}
 		} else {
-			a.logger.Printf("[App] OnShutdown: Skipping save of invalid window geometry: %dx%d", w, h)
+			a.logger.Printf("[App] OnBeforeClose: Skipping save of invalid window geometry: %dx%d", w, h)
 		}
 	}
+
+	// Return false to allow the window to close (true would prevent closing)
+	return false
+}
+
+// OnShutdown is called when the app is shutting down (after window is closed)
+func (a *App) OnShutdown(ctx context.Context) {
+	a.logger.Printf("[App] OnShutdown: Shutting down...")
 
 	// Cancel any running jobs
 	if a.jobManager != nil {
@@ -240,12 +250,13 @@ func Run() error {
 		Title:  "GusSync",
 		Width:  1024,
 		Height: 768,
-	AssetServer: &assetserver.Options{
-		Assets:  assets,
-		Handler: nil, // Use default handler for embedded assets
-	},
+		AssetServer: &assetserver.Options{
+			Assets:  assets,
+			Handler: nil, // Use default handler for embedded assets
+		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		OnStartup:        appInstance.OnStartup,
+		OnBeforeClose:    appInstance.OnBeforeClose,
 		OnShutdown:       appInstance.OnShutdown,
 		Bind: []interface{}{
 			prereqService,
