@@ -82,24 +82,45 @@ type JobEventEmitter interface {
 	EmitJobUpdate(event JobUpdateEvent)
 }
 
+// ThrottleConfig controls how often progress updates are emitted
+type ThrottleConfig struct {
+	MinInterval time.Duration // Minimum time between progress updates (default: 100ms = ~10/sec)
+}
+
+// DefaultThrottleConfig returns sensible defaults for throttling
+func DefaultThrottleConfig() ThrottleConfig {
+	return ThrottleConfig{
+		MinInterval: 100 * time.Millisecond, // ~10 updates per second max
+	}
+}
+
 // JobManager manages the lifecycle of long-running jobs.
 // It is the single source of truth for job state.
 // Adapters (Wails, CLI, API) use this to start/stop jobs and get state.
 type JobManager struct {
-	mu         sync.Mutex
-	jobs       map[string]*JobSnapshot
-	activeJob  string // ID of the currently running job (only one at a time)
-	seqCounter int64  // Global sequence counter for event ordering
-	cancels    map[string]context.CancelFunc
-	emitter    JobEventEmitter // Adapter-provided event emitter
+	mu           sync.Mutex
+	jobs         map[string]*JobSnapshot
+	activeJob    string // ID of the currently running job (only one at a time)
+	seqCounter   int64  // Global sequence counter for event ordering
+	cancels      map[string]context.CancelFunc
+	emitter      JobEventEmitter // Adapter-provided event emitter
+	throttle     ThrottleConfig  // Throttling configuration
+	lastEmitTime map[string]time.Time // Last emit time per job for throttling
 }
 
-// NewJobManager creates a new JobManager
+// NewJobManager creates a new JobManager with default throttling
 func NewJobManager(emitter JobEventEmitter) *JobManager {
+	return NewJobManagerWithThrottle(emitter, DefaultThrottleConfig())
+}
+
+// NewJobManagerWithThrottle creates a new JobManager with custom throttling
+func NewJobManagerWithThrottle(emitter JobEventEmitter, throttle ThrottleConfig) *JobManager {
 	return &JobManager{
-		jobs:    make(map[string]*JobSnapshot),
-		cancels: make(map[string]context.CancelFunc),
-		emitter: emitter,
+		jobs:         make(map[string]*JobSnapshot),
+		cancels:      make(map[string]context.CancelFunc),
+		emitter:      emitter,
+		throttle:     throttle,
+		lastEmitTime: make(map[string]time.Time),
 	}
 }
 
@@ -188,19 +209,32 @@ func (jm *JobManager) emitUpdate(jobID string) {
 func (jm *JobManager) UpdateProgress(jobID string, progress JobProgress, message string, workers map[int]string) {
 	jm.mu.Lock()
 	snapshot, exists := jm.jobs[jobID]
-	if exists {
-		snapshot.Progress = progress
-		if message != "" {
-			snapshot.Message = message
-		}
-		if workers != nil {
-			snapshot.Workers = workers
-		}
-		snapshot.UpdatedAt = time.Now()
+	if !exists {
+		jm.mu.Unlock()
+		return
+	}
+
+	// Always update the internal state
+	snapshot.Progress = progress
+	if message != "" {
+		snapshot.Message = message
+	}
+	if workers != nil {
+		snapshot.Workers = workers
+	}
+	snapshot.UpdatedAt = time.Now()
+
+	// Check throttling - only emit if enough time has passed
+	lastEmit := jm.lastEmitTime[jobID]
+	now := time.Now()
+	shouldEmit := now.Sub(lastEmit) >= jm.throttle.MinInterval
+
+	if shouldEmit {
+		jm.lastEmitTime[jobID] = now
 	}
 	jm.mu.Unlock()
 
-	if exists {
+	if shouldEmit {
 		jm.emitUpdate(jobID)
 	}
 }
