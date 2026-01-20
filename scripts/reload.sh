@@ -98,7 +98,9 @@ echo ""
 
 # Start wails dev in background, save PID, redirect output to log file
 # Use setsid to create a new session/process group for better control
-setsid bash -c "$WAILS_CMD" > "$LOG_FILE" 2>&1 &
+# Pass through environment variable to enable API server
+export GUSSYNC_API_PORT="${GUSSYNC_API_PORT:-8090}"
+setsid bash -c "GUSSYNC_API_PORT=$GUSSYNC_API_PORT $WAILS_CMD" > "$LOG_FILE" 2>&1 &
 NEW_PID=$!
 echo $NEW_PID > "$PID_FILE"
 

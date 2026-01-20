@@ -1,3 +1,20 @@
+export namespace core {
+	
+	export class JobManager {
+	
+	
+	    static createFrom(source: any = {}) {
+	        return new JobManager(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	
+	    }
+	}
+
+}
+
 export namespace services {
 	
 	export class CleanupRequest {

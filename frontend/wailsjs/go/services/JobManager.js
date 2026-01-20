@@ -18,6 +18,10 @@ export function GetActiveTask() {
   return window['go']['services']['JobManager']['GetActiveTask']();
 }
 
+export function GetCoreJobManager() {
+  return window['go']['services']['JobManager']['GetCoreJobManager']();
+}
+
 export function GetJobStatus() {
   return window['go']['services']['JobManager']['GetJobStatus']();
 }

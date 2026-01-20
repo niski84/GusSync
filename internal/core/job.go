@@ -131,6 +131,51 @@ func (jm *JobManager) SetEmitter(emitter JobEventEmitter) {
 	jm.emitter = emitter
 }
 
+// AddEmitter adds an additional emitter. Events will be sent to all registered emitters.
+func (jm *JobManager) AddEmitter(emitter JobEventEmitter) {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+
+	if jm.emitter == nil {
+		jm.emitter = emitter
+		return
+	}
+
+	// Wrap in multi-emitter if not already
+	if multi, ok := jm.emitter.(*MultiEmitter); ok {
+		multi.Add(emitter)
+	} else {
+		jm.emitter = &MultiEmitter{emitters: []JobEventEmitter{jm.emitter, emitter}}
+	}
+}
+
+// MultiEmitter broadcasts events to multiple emitters
+type MultiEmitter struct {
+	mu       sync.Mutex
+	emitters []JobEventEmitter
+}
+
+// Add adds an emitter to the multi-emitter
+func (m *MultiEmitter) Add(emitter JobEventEmitter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.emitters = append(m.emitters, emitter)
+}
+
+// EmitJobUpdate broadcasts the event to all registered emitters
+func (m *MultiEmitter) EmitJobUpdate(event JobUpdateEvent) {
+	m.mu.Lock()
+	emitters := make([]JobEventEmitter, len(m.emitters))
+	copy(emitters, m.emitters)
+	m.mu.Unlock()
+
+	for _, e := range emitters {
+		if e != nil {
+			e.EmitJobUpdate(event)
+		}
+	}
+}
+
 // StartJob starts a new job and returns the job ID and context.
 // The context is cancelled when CancelJob is called.
 func (jm *JobManager) StartJob(ctx context.Context, jobType string, message string, params map[string]string) (string, context.Context, error) {

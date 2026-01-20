@@ -142,6 +142,11 @@ func (jm *JobManager) CancelTask(taskID string) error {
 	return err
 }
 
+// GetCoreJobManager returns the underlying core.JobManager for use by other adapters (e.g., API)
+func (jm *JobManager) GetCoreJobManager() *core.JobManager {
+	return jm.core
+}
+
 // CancelJob cancels the currently active job
 func (jm *JobManager) CancelJob() error {
 	jm.logger.Printf("[JobManager] CancelJob: cancelling active job")

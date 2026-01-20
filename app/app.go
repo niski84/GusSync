@@ -5,6 +5,7 @@ import (
 	"embed"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/wailsapp/wails/v2"
@@ -13,6 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"GusSync/app/services"
+	"GusSync/internal/adapters/api"
 )
 
 //go:embed all:frontend_dist
@@ -30,6 +32,7 @@ type App struct {
 	jobManager     *services.JobManager
 	systemService  *services.SystemService
 	configService  *services.ConfigService
+	apiServer      *api.Server
 	logger         *log.Logger
 }
 
@@ -145,6 +148,17 @@ func (a *App) OnStartup(ctx context.Context) {
 	// Start window position monitor to save position on move/resize
 	go a.monitorWindowPosition(ctx)
 
+	// Start API server if enabled via environment variable
+	// Set GUSSYNC_API_PORT to enable (e.g., GUSSYNC_API_PORT=8080)
+	if apiPort := os.Getenv("GUSSYNC_API_PORT"); apiPort != "" {
+		port, err := strconv.Atoi(apiPort)
+		if err != nil {
+			logger.Printf("[App] OnStartup: Invalid API port '%s': %v", apiPort, err)
+		} else {
+			a.startAPIServer(ctx, port, logger)
+		}
+	}
+
 	totalDuration := time.Since(startTime)
 	logger.Printf("[TIMING %s] [App] OnStartup: EXIT - Total startup time: %v", time.Now().Format("2006-01-02 15:04:05.000"), totalDuration)
 }
@@ -185,6 +199,61 @@ func (a *App) OnShutdown(ctx context.Context) {
 	}
 
 	a.logger.Printf("[App] OnShutdown: Shutdown complete")
+}
+
+// startAPIServer initializes and starts the HTTP API server
+func (a *App) startAPIServer(ctx context.Context, port int, logger *log.Logger) {
+	logger.Printf("[App] Starting API server on port %d", port)
+
+	// Create the API server with the core job manager
+	coreJobManager := a.jobManager.GetCoreJobManager()
+
+	a.apiServer = api.NewServer(port, logger, coreJobManager,
+		// Provider for prerequisites
+		api.WithPrereqProvider(func() interface{} {
+			return a.prereqService.GetPrereqReport()
+		}),
+		// Provider for devices
+		api.WithDeviceProvider(func() interface{} {
+			devices, err := a.deviceService.GetDeviceStatus()
+			if err != nil {
+				return map[string]interface{}{
+					"devices":   []interface{}{},
+					"connected": false,
+					"error":     err.Error(),
+				}
+			}
+			return map[string]interface{}{
+				"devices":   devices,
+				"connected": len(devices) > 0,
+			}
+		}),
+		// Provider for config
+		api.WithConfigProvider(func() interface{} {
+			if a.configService != nil {
+				return a.configService.GetConfig()
+			}
+			return nil
+		}),
+		// Function to start a copy operation
+		api.WithStartCopyFunc(func(reqCtx context.Context, req api.StartCopyRequest) (string, error) {
+			// Use config values if not provided in request
+			dest := req.DestinationPath
+			if dest == "" && a.configService != nil {
+				cfg := a.configService.GetConfig()
+				dest = cfg.DestinationPath
+			}
+			// Use default mode "smart"
+			return a.copyService.StartBackup("", dest, "smart")
+		}),
+	)
+
+	// Register the API server as an additional event emitter
+	// This allows SSE clients to receive job updates alongside the Wails UI
+	coreJobManager.AddEmitter(a.apiServer)
+
+	// Start the API server in background
+	a.apiServer.StartBackground(ctx)
 }
 
 // monitorWindowPosition watches for window position/size changes and saves them
