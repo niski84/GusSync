@@ -35,6 +35,7 @@ type TaskArtifact struct {
 
 type TaskSnapshot struct {
 	TaskID    string            `json:"taskId"`
+	Seq       int64             `json:"seq"` // Monotonically increasing sequence number for out-of-order protection
 	Type      string            `json:"type"`
 	State     TaskState         `json:"state"`
 	Params    map[string]string `json:"params,omitempty"`
@@ -49,6 +50,7 @@ type TaskSnapshot struct {
 
 type TaskUpdateEvent struct {
 	TaskID   string            `json:"taskId"`
+	Seq      int64             `json:"seq"` // Monotonically increasing sequence number for out-of-order protection
 	Type     string            `json:"type"`
 	State    TaskState         `json:"state"`
 	Progress TaskProgress      `json:"progress"`

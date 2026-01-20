@@ -10,6 +10,10 @@ export function CancelTask(arg1) {
   return window['go']['services']['JobManager']['CancelTask'](arg1);
 }
 
+export function GetActiveTask() {
+  return window['go']['services']['JobManager']['GetActiveTask']();
+}
+
 export function GetJobStatus() {
   return window['go']['services']['JobManager']['GetJobStatus']();
 }

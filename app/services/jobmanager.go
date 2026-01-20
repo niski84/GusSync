@@ -20,6 +20,7 @@ type JobManager struct {
 	ctx        context.Context
 	logger     *log.Logger
 	cancels    map[string]context.CancelFunc
+	seqCounter int64 // Global sequence counter for out-of-order event protection
 }
 
 // NewJobManager creates a new JobManager
@@ -87,14 +88,18 @@ func (jm *JobManager) startTask(taskType string, message string, params map[stri
 func (jm *JobManager) emitTaskUpdate(taskID string) {
 	jm.mu.Lock()
 	snapshot, exists := jm.tasks[taskID]
-	jm.mu.Unlock()
-
 	if !exists {
+		jm.mu.Unlock()
 		return
 	}
 
+	// Increment global sequence counter and update snapshot
+	jm.seqCounter++
+	snapshot.Seq = jm.seqCounter
+
 	event := TaskUpdateEvent{
 		TaskID:   snapshot.TaskID,
+		Seq:      snapshot.Seq,
 		Type:     snapshot.Type,
 		State:    snapshot.State,
 		Progress: snapshot.Progress,
@@ -103,6 +108,7 @@ func (jm *JobManager) emitTaskUpdate(taskID string) {
 		Error:    snapshot.Error,
 		Artifact: snapshot.Artifact,
 	}
+	jm.mu.Unlock()
 
 	if jm.ctx != nil {
 		runtime.EventsEmit(jm.ctx, "task:update", event)
@@ -184,6 +190,26 @@ func (jm *JobManager) GetTask(taskID string) (*TaskSnapshot, error) {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 	return snapshot, nil
+}
+
+// GetActiveTask returns the currently active task snapshot, or nil if no task is running.
+// This is used for startup handshake - UI calls this on mount to get current state before subscribing to events.
+func (jm *JobManager) GetActiveTask() *TaskSnapshot {
+	jm.mu.Lock()
+	defer jm.mu.Unlock()
+
+	if jm.activeTask == "" {
+		return nil
+	}
+
+	snapshot, exists := jm.tasks[jm.activeTask]
+	if !exists {
+		return nil
+	}
+
+	// Return a copy to prevent race conditions
+	copySnapshot := *snapshot
+	return &copySnapshot
 }
 
 // ListTasks returns all tasks, sorted by creation time (newest first)

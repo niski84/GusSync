@@ -1,9 +1,14 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 
 /**
  * Custom hook to manage GusSync tasks and UI state
  * Uses the "task:update" unified event stream as the single source of truth.
+ * 
+ * Implements startup handshake pattern:
+ * 1. On mount, fetch current task state via GetActiveTask()
+ * 2. Subscribe to events
+ * 3. Ignore out-of-order events using seq number
  */
 export function useBackupState() {
   const [activeTask, setActiveTask] = useState(null)
@@ -28,90 +33,128 @@ export function useBackupState() {
     errorDirectories: 0
   })
 
+  // Track last seen sequence number for out-of-order protection
+  const lastSeqRef = useRef(0)
+
+  // Helper function to process task updates (used by both initial fetch and events)
+  const processTaskUpdate = (task) => {
+    if (!task) return false
+
+    // Out-of-order protection: ignore events with seq <= lastSeqSeen
+    const taskSeq = task.seq || 0
+    if (taskSeq > 0 && taskSeq <= lastSeqRef.current) {
+      console.log('[useBackupState] Ignoring out-of-order event, seq:', taskSeq, 'lastSeen:', lastSeqRef.current)
+      return false
+    }
+    lastSeqRef.current = taskSeq
+
+    setActiveTask(task)
+    
+    // Map to legacy fields for backward compatibility with Dashboard.jsx
+    const stateMap = {
+      'queued': 'running',
+      'running': 'running',
+      'succeeded': 'success',
+      'failed': 'error',
+      'canceled': 'idle'
+    }
+    
+    const mappedStatus = stateMap[task.state] || 'idle'
+    setStatus(mappedStatus)
+    setIsRunning(task.state === 'running' || task.state === 'queued')
+    setProgress(task.progress?.percent || 0)
+    setStatusMessage(task.message || '')
+
+    // Update paths if available in task params
+    if (task.params?.sourcePath) setSourcePath(task.params.sourcePath)
+    if (task.params?.destPath) setDestPath(task.params.destPath)
+    if (task.params?.sourceRoot) setSourcePath(task.params.sourceRoot)
+    if (task.params?.destRoot) setDestPath(task.params.destRoot)
+
+    // Update discovery state from task progress
+    if (task.progress?.phase === 'scanning' || task.progress?.phase === 'starting') {
+      setDiscoveryState({
+        isDiscovering: true,
+        totalFilesFound: task.progress?.current || 0,
+        completedDirectories: 0,
+        currentDirectory: task.message || '',
+        totalDirectories: 0,
+        timeoutDirectories: 0,
+        errorDirectories: 0
+      })
+    } else if (task.progress?.phase === 'copying' || task.progress?.phase === 'finishing' || 
+               task.progress?.phase === 'verifying' || task.progress?.phase === 'cleaning') {
+      setDiscoveryState(prev => ({
+        ...prev,
+        isDiscovering: false,
+        totalFilesFound: task.progress?.total || prev.totalFilesFound
+      }))
+    }
+    
+    // Reset discovery state when task completes or fails
+    if (task.state === 'succeeded' || task.state === 'failed' || task.state === 'canceled') {
+      setDiscoveryState(prev => ({
+        ...prev,
+        isDiscovering: false
+      }))
+      // Save the completed task so we can show the report
+      setLastCompletedTask({
+        ...task,
+        completedAt: new Date().toISOString()
+      })
+    }
+
+    if (task.workers) {
+      // Map new workers model to legacy format for Dashboard.jsx
+      const mappedWorkers = {}
+      Object.entries(task.workers).forEach(([id, workerStatus]) => {
+        mappedWorkers[id] = {
+          status: workerStatus.includes('Copying') ? 'copying' : (workerStatus.includes('Starting') ? 'starting' : 'active'),
+          message: workerStatus,
+          fileName: workerStatus.split(': ')[1] || '',
+          progress: workerStatus.includes('%') ? parseFloat(workerStatus.match(/(\d+\.?\d*)%/)?.[1] || 0) : 0
+        }
+      })
+      setWorkers(mappedWorkers)
+    }
+
+    if (task.logLine) {
+      setRecentLogs(prev => {
+        const newLogs = [...prev, task.logLine]
+        return newLogs.slice(-10) // Show more in unified model
+      })
+    }
+
+    return true
+  }
+
   useEffect(() => {
     if (!window.runtime) return
 
-    console.log('[useBackupState] Setting up unified task listener')
+    console.log('[useBackupState] Setting up unified task listener with startup handshake')
 
-    // Unified Task Listener
+    // STARTUP HANDSHAKE: Fetch current task state before subscribing to events
+    const fetchActiveTask = async () => {
+      if (window.go?.services?.JobManager?.GetActiveTask) {
+        try {
+          const task = await window.go.services.JobManager.GetActiveTask()
+          if (task) {
+            console.log('[useBackupState] Startup handshake - got active task:', task)
+            processTaskUpdate(task)
+          } else {
+            console.log('[useBackupState] Startup handshake - no active task')
+          }
+        } catch (e) {
+          console.warn('[useBackupState] Failed to fetch active task:', e)
+        }
+      }
+    }
+    fetchActiveTask()
+
+    // Unified Task Listener (now with seq protection via processTaskUpdate)
     const cleanupTask = EventsOn('task:update', (task) => {
       console.log('[useBackupState] task:update:', task)
-      setActiveTask(task)
-      
-      // Map to legacy fields for backward compatibility with Dashboard.jsx
-      const stateMap = {
-        'queued': 'running',
-        'running': 'running',
-        'succeeded': 'success',
-        'failed': 'error',
-        'canceled': 'idle'
-      }
-      
-      const mappedStatus = stateMap[task.state] || 'idle'
-      setStatus(mappedStatus)
-      setIsRunning(task.state === 'running' || task.state === 'queued')
-      setProgress(task.progress?.percent || 0)
-      setStatusMessage(task.message || '')
-
-      // Update paths if available in task params
-      if (task.params?.sourcePath) setSourcePath(task.params.sourcePath)
-      if (task.params?.destPath) setDestPath(task.params.destPath)
-      if (task.params?.sourceRoot) setSourcePath(task.params.sourceRoot)
-      if (task.params?.destRoot) setDestPath(task.params.destRoot)
-
-      // Update discovery state from task progress
-      if (task.progress?.phase === 'scanning' || task.progress?.phase === 'starting') {
-        setDiscoveryState({
-          isDiscovering: true,
-          totalFilesFound: task.progress?.current || 0,
-          completedDirectories: 0,
-          currentDirectory: task.message || '',
-          totalDirectories: 0,
-          timeoutDirectories: 0,
-          errorDirectories: 0
-        })
-      } else if (task.progress?.phase === 'copying' || task.progress?.phase === 'finishing' || 
-                 task.progress?.phase === 'verifying' || task.progress?.phase === 'cleaning') {
-        setDiscoveryState(prev => ({
-          ...prev,
-          isDiscovering: false,
-          totalFilesFound: task.progress?.total || prev.totalFilesFound
-        }))
-      }
-      
-      // Reset discovery state when task completes or fails
-      if (task.state === 'succeeded' || task.state === 'failed' || task.state === 'canceled') {
-        setDiscoveryState(prev => ({
-          ...prev,
-          isDiscovering: false
-        }))
-        // Save the completed task so we can show the report
-        setLastCompletedTask({
-          ...task,
-          completedAt: new Date().toISOString()
-        })
-      }
-
-      if (task.workers) {
-        // Map new workers model to legacy format for Dashboard.jsx
-        const mappedWorkers = {}
-        Object.entries(task.workers).forEach(([id, status]) => {
-          mappedWorkers[id] = {
-            status: status.includes('Copying') ? 'copying' : (status.includes('Starting') ? 'starting' : 'active'),
-            message: status,
-            fileName: status.split(': ')[1] || '',
-            progress: status.includes('%') ? parseFloat(status.match(/(\d+\.?\d*)%/)?.[1] || 0) : 0
-          }
-        })
-        setWorkers(mappedWorkers)
-      }
-
-      if (task.logLine) {
-        setRecentLogs(prev => {
-          const newLogs = [...prev, task.logLine]
-          return newLogs.slice(-10) // Show more in unified model
-        })
-      }
+      processTaskUpdate(task)
     })
 
     // Device List Listener (keeps device status updated independently of tasks)

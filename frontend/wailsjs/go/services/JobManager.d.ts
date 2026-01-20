@@ -7,6 +7,8 @@ export function CancelJob():Promise<void>;
 
 export function CancelTask(arg1:string):Promise<void>;
 
+export function GetActiveTask():Promise<services.TaskSnapshot>;
+
 export function GetJobStatus():Promise<services.JobInfo>;
 
 export function GetTask(arg1:string):Promise<services.TaskSnapshot>;

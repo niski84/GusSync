@@ -247,6 +247,7 @@ export namespace services {
 	}
 	export class TaskSnapshot {
 	    taskId: string;
+	    seq: number;
 	    type: string;
 	    state: string;
 	    params?: Record<string, string>;
@@ -267,6 +268,7 @@ export namespace services {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.taskId = source["taskId"];
+	        this.seq = source["seq"];
 	        this.type = source["type"];
 	        this.state = source["state"];
 	        this.params = source["params"];
