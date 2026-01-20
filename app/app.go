@@ -142,6 +142,9 @@ func (a *App) OnStartup(ctx context.Context) {
 		logger.Printf("[App] OnStartup: Overall status: %s", report.OverallStatus)
 	}()
 
+	// Start window position monitor to save position on move/resize
+	go a.monitorWindowPosition(ctx)
+
 	totalDuration := time.Since(startTime)
 	logger.Printf("[TIMING %s] [App] OnStartup: EXIT - Total startup time: %v", time.Now().Format("2006-01-02 15:04:05.000"), totalDuration)
 }
@@ -182,6 +185,64 @@ func (a *App) OnShutdown(ctx context.Context) {
 	}
 
 	a.logger.Printf("[App] OnShutdown: Shutdown complete")
+}
+
+// monitorWindowPosition watches for window position/size changes and saves them
+// This ensures the position is saved even if the app is killed unexpectedly
+func (a *App) monitorWindowPosition(ctx context.Context) {
+	// Wait a bit for window to stabilize after startup
+	time.Sleep(2 * time.Second)
+
+	var lastX, lastY, lastW, lastH int
+	var lastSaveTime time.Time
+	const saveDebounce = 500 * time.Millisecond // Don't save more than once per 500ms
+	const checkInterval = 200 * time.Millisecond
+
+	// Get initial position and save it
+	if a.ctx != nil && a.configService != nil {
+		lastX, lastY = runtime.WindowGetPosition(a.ctx)
+		lastW, lastH = runtime.WindowGetSize(a.ctx)
+		a.logger.Printf("[App] monitorWindowPosition: Initial position %dx%d at (%d,%d)", lastW, lastH, lastX, lastY)
+		// Save initial position
+		if lastW > 0 && lastH > 0 {
+			if err := a.configService.SetWindowGeometry(lastX, lastY, lastW, lastH); err != nil {
+				a.logger.Printf("[App] monitorWindowPosition: Failed to save initial position: %v", err)
+			} else {
+				a.logger.Printf("[App] monitorWindowPosition: Saved initial position")
+			}
+		}
+	}
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			a.logger.Printf("[App] monitorWindowPosition: Context cancelled, stopping monitor")
+			return
+		case <-ticker.C:
+			if a.ctx == nil || a.configService == nil {
+				continue
+			}
+
+			x, y := runtime.WindowGetPosition(a.ctx)
+			w, h := runtime.WindowGetSize(a.ctx)
+
+			// Check if position or size changed
+			if x != lastX || y != lastY || w != lastW || h != lastH {
+				// Position changed - check debounce
+				if time.Since(lastSaveTime) >= saveDebounce && w > 0 && h > 0 {
+					a.logger.Printf("[App] monitorWindowPosition: Window moved/resized to %dx%d at (%d,%d)", w, h, x, y)
+					if err := a.configService.SetWindowGeometry(x, y, w, h); err != nil {
+						a.logger.Printf("[App] monitorWindowPosition: Failed to save: %v", err)
+					}
+					lastSaveTime = time.Now()
+				}
+				lastX, lastY, lastW, lastH = x, y, w, h
+			}
+		}
+	}
 }
 
 // startPrereqPolling - DISABLED: Prerequisites now only run once on startup and manually via RefreshNow()
