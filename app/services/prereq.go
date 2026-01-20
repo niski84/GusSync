@@ -21,6 +21,7 @@ type PrereqService struct {
 	logger     *log.Logger
 	lastReport *PrereqReport
 	reportMu   sync.Mutex // Protect lastReport access
+	seqCounter int64      // Sequence counter for report versioning
 	errorFile  *os.File
 	errorLog   *log.Logger
 	errorMutex sync.Mutex
@@ -77,10 +78,11 @@ type PrereqCheck struct {
 
 // PrereqReport contains all prerequisite checks
 type PrereqReport struct {
-	OverallStatus string       `json:"overallStatus"` // "ok", "warn", "fail"
-	OS            string       `json:"os"`            // "linux", "windows", "darwin"
+	OverallStatus string        `json:"overallStatus"` // "ok", "warn", "fail"
+	Seq           int64         `json:"seq"`           // Monotonically increasing sequence number
+	OS            string        `json:"os"`            // "linux", "windows", "darwin"
 	Checks        []PrereqCheck `json:"checks"`
-	Timestamp     time.Time    `json:"timestamp"`
+	Timestamp     time.Time     `json:"timestamp"`
 }
 
 // RefreshNow forces an immediate prerequisite check and returns the report (bypasses cache)
@@ -163,8 +165,15 @@ func (s *PrereqService) getPrereqReportInternal(forceRefresh bool) PrereqReport 
 	startTime := time.Now()
 	s.logDebug("[PrereqService] GetPrereqReport: ENTRY - Starting prerequisite report generation")
 
+	// Increment sequence counter for this report
+	s.reportMu.Lock()
+	s.seqCounter++
+	seq := s.seqCounter
+	s.reportMu.Unlock()
+
 	report := PrereqReport{
 		OS:        goruntime.GOOS,
+		Seq:       seq,
 		Checks:    []PrereqCheck{},
 		Timestamp: time.Now(),
 	}

@@ -103,8 +103,10 @@ func (jm *JobManager) failTask(taskID string, err error, details string) {
 
 // GetTask returns a snapshot of a task
 func (jm *JobManager) GetTask(taskID string) (*TaskSnapshot, error) {
+	jm.logger.Printf("[JobManager] GetTask: taskID=%s", taskID)
 	coreSnapshot, err := jm.core.GetJob(taskID)
 	if err != nil {
+		jm.logger.Printf("[JobManager] GetTask: error=%v", err)
 		return nil, err
 	}
 	return coreSnapshotToTask(coreSnapshot), nil
@@ -132,12 +134,22 @@ func (jm *JobManager) ListTasks() []*TaskSnapshot {
 
 // CancelTask cancels a running task
 func (jm *JobManager) CancelTask(taskID string) error {
-	return jm.core.CancelJob(taskID)
+	jm.logger.Printf("[JobManager] CancelTask: taskID=%s", taskID)
+	err := jm.core.CancelJob(taskID)
+	if err != nil {
+		jm.logger.Printf("[JobManager] CancelTask: error=%v", err)
+	}
+	return err
 }
 
 // CancelJob cancels the currently active job
 func (jm *JobManager) CancelJob() error {
-	return jm.core.CancelActiveJob()
+	jm.logger.Printf("[JobManager] CancelJob: cancelling active job")
+	err := jm.core.CancelActiveJob()
+	if err != nil {
+		jm.logger.Printf("[JobManager] CancelJob: error=%v", err)
+	}
+	return err
 }
 
 // completeJob marks the active job as complete (legacy support)

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, useMemo } from 'react'
+import React, { createContext, useContext, useState, useCallback, useMemo, useRef } from 'react'
 
 const AppStoreContext = createContext(null)
 
@@ -8,6 +8,9 @@ export function AppStoreProvider({ children }) {
   const [checkProgress, setCheckProgress] = useState({}) // Track check progress: { checkID: 'starting' | 'completed' }
   const [currentCheckID, setCurrentCheckID] = useState(null) // Current check being run
   const maxLogs = 2000
+
+  // Track last seen seq for out-of-order protection
+  const lastPrereqSeqRef = useRef(0)
 
   const addLog = useCallback((logEntry) => {
     setLogs((prev) => {
@@ -38,11 +41,28 @@ export function AppStoreProvider({ children }) {
     setCurrentCheckID(checkID || null)
   }, [])
 
+  // Wrapper for setPrereqReport that enforces seq-based ordering
+  const updatePrereqReport = useCallback((report) => {
+    if (!report) {
+      setPrereqReport(null)
+      lastPrereqSeqRef.current = 0
+      return
+    }
+    
+    const reportSeq = report.seq || 0
+    if (reportSeq > 0 && reportSeq <= lastPrereqSeqRef.current) {
+      console.log('[Store] Ignoring out-of-order prereq report, seq:', reportSeq, 'lastSeen:', lastPrereqSeqRef.current)
+      return
+    }
+    lastPrereqSeqRef.current = reportSeq
+    setPrereqReport(report)
+  }, [])
+
   // Memoize the store object to maintain stable reference across renders
   // This prevents useEffect dependencies from triggering re-subscriptions
   const store = useMemo(() => ({
     prereqReport,
-    setPrereqReport,
+    setPrereqReport: updatePrereqReport, // Use seq-protected wrapper
     logs,
     addLog,
     checkProgress,
@@ -56,6 +76,7 @@ export function AppStoreProvider({ children }) {
     checkProgress,
     currentCheckID,
     addLog,
+    updatePrereqReport,
     updateCheckProgress,
     updateCurrentCheckID,
   ])

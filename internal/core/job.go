@@ -145,7 +145,7 @@ func (jm *JobManager) StartJob(ctx context.Context, jobType string, message stri
 		}
 	}
 
-	jobID := fmt.Sprintf("%s-%d", jobType, time.Now().Unix())
+	jobID := fmt.Sprintf("%s-%d", jobType, time.Now().UnixNano())
 	jobCtx, cancel := context.WithCancel(ctx)
 
 	snapshot := &JobSnapshot{

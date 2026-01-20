@@ -146,6 +146,7 @@ export namespace services {
 	}
 	export class PrereqReport {
 	    overallStatus: string;
+	    seq: number;
 	    os: string;
 	    checks: PrereqCheck[];
 	    // Go type: time
@@ -158,6 +159,7 @@ export namespace services {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.overallStatus = source["overallStatus"];
+	        this.seq = source["seq"];
 	        this.os = source["os"];
 	        this.checks = this.convertValues(source["checks"], PrereqCheck);
 	        this.timestamp = this.convertValues(source["timestamp"], null);
