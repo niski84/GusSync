@@ -100,26 +100,9 @@ func (r *WailsReporter) ReportLog(level, message string) {
 }
 
 func (r *WailsReporter) muLogLineEmit(logLine string) {
-	r.jobManager.mu.Lock()
-	snapshot, exists := r.jobManager.tasks[r.jobID]
-	r.jobManager.mu.Unlock()
-
-	if !exists {
-		return
-	}
-
-	event := TaskUpdateEvent{
-		TaskID:   snapshot.TaskID,
-		Type:     snapshot.Type,
-		State:    snapshot.State,
-		Progress: snapshot.Progress,
-		Message:  snapshot.Message,
-		LogLine:  logLine,
-		Artifact: snapshot.Artifact,
-	}
-
-	if r.ctx != nil {
-		runtime.EventsEmit(r.ctx, "task:update", event)
+	// Use the JobManager's EmitLogLine method instead of direct field access
+	if r.jobManager != nil {
+		r.jobManager.EmitLogLine(r.jobID, logLine)
 	}
 }
 

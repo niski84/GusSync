@@ -1,264 +1,189 @@
 package services
 
 import (
+	"GusSync/internal/core"
 	"context"
-	"fmt"
 	"log"
-	"sort"
-	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// JobManager manages long-running tasks (copy, verify, cleanup)
-// Ensures only one task runs at a time and maintains task history
+// WailsJobEmitter implements core.JobEventEmitter for Wails frontend
+type WailsJobEmitter struct {
+	ctx    context.Context
+	logger *log.Logger
+}
+
+// EmitJobUpdate sends job update events to the Wails frontend
+func (e *WailsJobEmitter) EmitJobUpdate(event core.JobUpdateEvent) {
+	if e.ctx == nil {
+		return
+	}
+
+	// Convert core event to the existing task:update format for frontend compatibility
+	taskEvent := TaskUpdateEvent{
+		TaskID:   event.JobID,
+		Seq:      event.Seq,
+		Type:     event.Type,
+		State:    TaskState(event.State), // Convert core.JobState to TaskState
+		Progress: TaskProgress(event.Progress),
+		Message:  event.Message,
+		LogLine:  event.LogLine,
+		Workers:  event.Workers,
+		Artifact: TaskArtifact(event.Artifact),
+	}
+
+	if event.Error != nil {
+		taskEvent.Error = &TaskError{
+			Code:    event.Error.Code,
+			Message: event.Error.Message,
+			Details: event.Error.Details,
+		}
+	}
+
+	runtime.EventsEmit(e.ctx, "task:update", taskEvent)
+}
+
+// JobManager wraps the core.JobManager and provides Wails-specific functionality.
+// This is the adapter layer that translates between core and Wails.
 type JobManager struct {
-	mu         sync.Mutex
-	tasks      map[string]*TaskSnapshot
-	activeTask string // ID of the currently running task
-	ctx        context.Context
-	logger     *log.Logger
-	cancels    map[string]context.CancelFunc
-	seqCounter int64 // Global sequence counter for out-of-order event protection
+	core    *core.JobManager
+	emitter *WailsJobEmitter
+	ctx     context.Context
+	logger  *log.Logger
 }
 
 // NewJobManager creates a new JobManager
 func NewJobManager(ctx context.Context, logger *log.Logger) *JobManager {
+	emitter := &WailsJobEmitter{ctx: ctx, logger: logger}
+	coreManager := core.NewJobManager(emitter)
+
 	return &JobManager{
+		core:    coreManager,
+		emitter: emitter,
 		ctx:     ctx,
 		logger:  logger,
-		tasks:   make(map[string]*TaskSnapshot),
-		cancels: make(map[string]context.CancelFunc),
 	}
 }
 
 // SetContext updates the context for the JobManager
 func (jm *JobManager) SetContext(ctx context.Context) {
-	jm.mu.Lock()
-	defer jm.mu.Unlock()
 	jm.ctx = ctx
+	jm.emitter.ctx = ctx
 }
 
 // startTask starts a new task and returns a taskId immediately
 func (jm *JobManager) startTask(taskType string, message string, params map[string]string) (string, context.Context, error) {
-	jm.mu.Lock()
-
-	// Check if a task is already running
-	if jm.activeTask != "" {
-		active := jm.tasks[jm.activeTask]
-		if active != nil && active.State == TaskRunning {
-			jm.mu.Unlock()
-			return "", nil, fmt.Errorf("a task is already running: %s (%s)", active.TaskID, active.Type)
-		}
-	}
-
-	taskID := fmt.Sprintf("%s-%d", taskType, time.Now().Unix())
-	jobCtx, cancel := context.WithCancel(jm.ctx)
-
-	snapshot := &TaskSnapshot{
-		TaskID:    taskID,
-		Type:      taskType,
-		State:     TaskRunning,
-		Params:    params,
-		Message:   message,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
-		Progress: TaskProgress{
-			Phase: "starting",
-		},
-	}
-
-	jm.tasks[taskID] = snapshot
-	jm.cancels[taskID] = cancel
-	jm.activeTask = taskID
-
-	jm.logger.Printf("[JobManager] startTask: %s type=%s", taskID, taskType)
-	
-	// IMPORTANT: Release lock BEFORE calling emitTaskUpdate to avoid deadlock
-	jm.mu.Unlock()
-	
-	// Emit initial event (must be outside lock to avoid deadlock)
-	jm.emitTaskUpdate(taskID)
-
-	return taskID, jobCtx, nil
-}
-
-// emitTaskUpdate sends the current task state to the frontend
-func (jm *JobManager) emitTaskUpdate(taskID string) {
-	jm.mu.Lock()
-	snapshot, exists := jm.tasks[taskID]
-	if !exists {
-		jm.mu.Unlock()
-		return
-	}
-
-	// Increment global sequence counter and update snapshot
-	jm.seqCounter++
-	snapshot.Seq = jm.seqCounter
-
-	event := TaskUpdateEvent{
-		TaskID:   snapshot.TaskID,
-		Seq:      snapshot.Seq,
-		Type:     snapshot.Type,
-		State:    snapshot.State,
-		Progress: snapshot.Progress,
-		Message:  snapshot.Message,
-		Workers:  snapshot.Workers,
-		Error:    snapshot.Error,
-		Artifact: snapshot.Artifact,
-	}
-	jm.mu.Unlock()
-
-	if jm.ctx != nil {
-		runtime.EventsEmit(jm.ctx, "task:update", event)
-	}
+	jm.logger.Printf("[JobManager] startTask: type=%s msg=%s", taskType, message)
+	return jm.core.StartJob(jm.ctx, taskType, message, params)
 }
 
 // updateTaskProgress updates the progress of a task
 func (jm *JobManager) updateTaskProgress(taskID string, progress TaskProgress, message string, workers map[int]string) {
-	jm.mu.Lock()
-	snapshot, exists := jm.tasks[taskID]
-	if exists {
-		snapshot.Progress = progress
-		if message != "" {
-			snapshot.Message = message
-		}
-		if workers != nil {
-			snapshot.Workers = workers
-		}
-		snapshot.UpdatedAt = time.Now()
+	coreProgress := core.JobProgress{
+		Phase:   progress.Phase,
+		Current: progress.Current,
+		Total:   progress.Total,
+		Percent: progress.Percent,
+		Rate:    progress.Rate,
 	}
-	jm.mu.Unlock()
-
-	if exists {
-		jm.emitTaskUpdate(taskID)
-	}
+	jm.core.UpdateProgress(taskID, coreProgress, message, workers)
 }
 
 // completeTask marks a task as succeeded
 func (jm *JobManager) completeTask(taskID string, message string) {
-	jm.mu.Lock()
-	snapshot, exists := jm.tasks[taskID]
-	if exists {
-		snapshot.State = TaskSucceeded
-		if message != "" {
-			snapshot.Message = message
-		}
-		snapshot.Progress.Percent = 100
-		snapshot.UpdatedAt = time.Now()
-		if jm.activeTask == taskID {
-			jm.activeTask = ""
-		}
-	}
-	jm.mu.Unlock()
-
-	if exists {
-		jm.emitTaskUpdate(taskID)
-	}
+	jm.core.CompleteJob(taskID, message)
 }
 
 // failTask marks a task as failed
 func (jm *JobManager) failTask(taskID string, err error, details string) {
-	jm.mu.Lock()
-	snapshot, exists := jm.tasks[taskID]
-	if exists {
-		snapshot.State = TaskFailed
-		snapshot.Error = &TaskError{
-			Message: err.Error(),
-			Details: details,
-		}
-		snapshot.UpdatedAt = time.Now()
-		if jm.activeTask == taskID {
-			jm.activeTask = ""
-		}
-	}
-	jm.mu.Unlock()
-
-	if exists {
-		jm.emitTaskUpdate(taskID)
-	}
+	jm.core.FailJob(taskID, err, details)
 }
 
 // GetTask returns a snapshot of a task
 func (jm *JobManager) GetTask(taskID string) (*TaskSnapshot, error) {
-	jm.mu.Lock()
-	defer jm.mu.Unlock()
-
-	snapshot, exists := jm.tasks[taskID]
-	if !exists {
-		return nil, fmt.Errorf("task not found: %s", taskID)
+	coreSnapshot, err := jm.core.GetJob(taskID)
+	if err != nil {
+		return nil, err
 	}
-	return snapshot, nil
+	return coreSnapshotToTask(coreSnapshot), nil
 }
 
 // GetActiveTask returns the currently active task snapshot, or nil if no task is running.
 // This is used for startup handshake - UI calls this on mount to get current state before subscribing to events.
 func (jm *JobManager) GetActiveTask() *TaskSnapshot {
-	jm.mu.Lock()
-	defer jm.mu.Unlock()
-
-	if jm.activeTask == "" {
+	coreSnapshot := jm.core.GetActiveJob()
+	if coreSnapshot == nil {
 		return nil
 	}
-
-	snapshot, exists := jm.tasks[jm.activeTask]
-	if !exists {
-		return nil
-	}
-
-	// Return a copy to prevent race conditions
-	copySnapshot := *snapshot
-	return &copySnapshot
+	return coreSnapshotToTask(coreSnapshot)
 }
 
 // ListTasks returns all tasks, sorted by creation time (newest first)
 func (jm *JobManager) ListTasks() []*TaskSnapshot {
-	jm.mu.Lock()
-	defer jm.mu.Unlock()
-
-	list := make([]*TaskSnapshot, 0, len(jm.tasks))
-	for _, t := range jm.tasks {
-		list = append(list, t)
+	coreSnapshots := jm.core.ListJobs()
+	result := make([]*TaskSnapshot, len(coreSnapshots))
+	for i, cs := range coreSnapshots {
+		result[i] = coreSnapshotToTask(cs)
 	}
-
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].CreatedAt.After(list[j].CreatedAt)
-	})
-
-	return list
+	return result
 }
 
 // CancelTask cancels a running task
 func (jm *JobManager) CancelTask(taskID string) error {
-	jm.mu.Lock()
-	cancel, exists := jm.cancels[taskID]
-	snapshot, sExists := jm.tasks[taskID]
-	jm.mu.Unlock()
+	return jm.core.CancelJob(taskID)
+}
 
-	if !exists {
-		return fmt.Errorf("task not found or not cancellable: %s", taskID)
+// CancelJob cancels the currently active job
+func (jm *JobManager) CancelJob() error {
+	return jm.core.CancelActiveJob()
+}
+
+// completeJob marks the active job as complete (legacy support)
+func (jm *JobManager) completeJob(success bool) error {
+	activeSnapshot := jm.core.GetActiveJob()
+	if activeSnapshot == nil {
+		return nil // No active job
 	}
-
-	cancel()
-
-	if sExists {
-		jm.mu.Lock()
-		snapshot.State = TaskCanceled
-		snapshot.Message = "Task canceled by user"
-		snapshot.UpdatedAt = time.Now()
-		if jm.activeTask == taskID {
-			jm.activeTask = ""
-		}
-		jm.mu.Unlock()
-		jm.emitTaskUpdate(taskID)
+	if success {
+		jm.core.CompleteJob(activeSnapshot.JobID, "Completed successfully")
+	} else {
+		jm.core.FailJob(activeSnapshot.JobID, nil, "Job failed")
 	}
-
 	return nil
 }
 
-// Legacy support for JobManager (to be removed once refactoring complete)
+// GetJobStatus returns the current job status (legacy support)
+func (jm *JobManager) GetJobStatus() *JobInfo {
+	coreSnapshot := jm.core.GetActiveJob()
+	if coreSnapshot == nil {
+		return nil
+	}
+	return &JobInfo{
+		ID:        coreSnapshot.JobID,
+		Type:      coreSnapshot.Type,
+		Status:    string(coreSnapshot.State),
+		StartTime: coreSnapshot.CreatedAt,
+	}
+}
 
+// startJob starts a job (legacy support)
+func (jm *JobManager) startJob(jobType string) (string, context.Context, error) {
+	return jm.startTask(jobType, "Starting "+jobType, nil)
+}
+
+// SetProcessPID is not used in the new model but kept for compatibility
+func (jm *JobManager) SetProcessPID(pid int, pgid int) {
+	// Not used in new Task model
+}
+
+// EmitLogLine emits a log line event for a specific job
+func (jm *JobManager) EmitLogLine(jobID string, logLine string) {
+	jm.core.EmitLogLine(jobID, logLine)
+}
+
+// Legacy JobInfo type for backwards compatibility
 type JobInfo struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`
@@ -266,63 +191,33 @@ type JobInfo struct {
 	StartTime time.Time `json:"startTime"`
 }
 
-func (jm *JobManager) startJob(jobType string) (string, context.Context, error) {
-	return jm.startTask(jobType, "Starting "+jobType, nil)
-}
-
-func (jm *JobManager) CancelJob() error {
-	jm.mu.Lock()
-	active := jm.activeTask
-	jm.mu.Unlock()
-	if active == "" {
-		return fmt.Errorf("no active task to cancel")
-	}
-	return jm.CancelTask(active)
-}
-
-func (jm *JobManager) completeJob(success bool) error {
-	jm.mu.Lock()
-	active := jm.activeTask
-	jm.mu.Unlock()
-	if active == "" {
-		return fmt.Errorf("no active task to complete")
-	}
-	if success {
-		jm.completeTask(active, "Completed successfully")
-	} else {
-		jm.failTask(active, fmt.Errorf("job failed"), "")
-	}
-	return nil
-}
-
-func (jm *JobManager) GetJobStatus() *JobInfo {
-	jm.mu.Lock()
-	activeID := jm.activeTask
-	jm.mu.Unlock()
-
-	if activeID == "" {
+// coreSnapshotToTask converts a core.JobSnapshot to a TaskSnapshot
+func coreSnapshotToTask(cs *core.JobSnapshot) *TaskSnapshot {
+	if cs == nil {
 		return nil
 	}
 
-	jm.mu.Lock()
-	t := jm.tasks[activeID]
-	jm.mu.Unlock()
-
-	if t == nil {
-		return nil
+	ts := &TaskSnapshot{
+		TaskID:    cs.JobID,
+		Seq:       cs.Seq,
+		Type:      cs.Type,
+		State:     TaskState(cs.State),
+		Params:    cs.Params,
+		Progress:  TaskProgress(cs.Progress),
+		Message:   cs.Message,
+		Workers:   cs.Workers,
+		Artifact:  TaskArtifact(cs.Artifact),
+		CreatedAt: cs.CreatedAt,
+		UpdatedAt: cs.UpdatedAt,
 	}
 
-	return &JobInfo{
-		ID:        t.TaskID,
-		Type:      t.Type,
-		Status:    string(t.State),
-		StartTime: t.CreatedAt,
+	if cs.Error != nil {
+		ts.Error = &TaskError{
+			Code:    cs.Error.Code,
+			Message: cs.Error.Message,
+			Details: cs.Error.Details,
+		}
 	}
+
+	return ts
 }
-
-func (jm *JobManager) SetProcessPID(pid int, pgid int) {
-	// Not used in new Task model for now, but keeping for compatibility
-}
-
-
-
